@@ -1,0 +1,1820 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a0a0f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>AttendPro — Staff Management</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+
+<!-- ═══════════════════════════════════════════════════════
+     FIREBASE CONFIG — PASTE YOUR CONFIG HERE
+     Get this from: Firebase Console → Project Settings → Your Apps
+     ═══════════════════════════════════════════════════════ -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc,
+         collection, addDoc, getDocs, query, where, orderBy, onSnapshot,
+         serverTimestamp, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ▼▼▼ PASTE YOUR FIREBASE CONFIG BELOW ▼▼▼
+const firebaseConfig = {
+  apiKey:            "AIzaSyB9uLl1lCoqkO3pa1jpvaHMr4oHEHmf7iQ",
+  authDomain:        "attendpro-543ad.firebaseapp.com",
+  projectId:         "attendpro-543ad",
+  storageBucket:     "attendpro-543ad.firebasestorage.app",
+  messagingSenderId: "528595390970",
+  appId:             "1:528595390970:web:49a256d0d9791c6c33d443"
+};
+// ▲▲▲ PASTE YOUR FIREBASE CONFIG ABOVE ▲▲▲
+
+const app  = initializeApp(firebaseConfig);
+const db   = getFirestore(app);
+
+// ─────────────────────────────────────────────
+//  STORAGE LAYER
+//  All reads/writes go through these functions.
+//  Swap localStorage ↔ Firestore here only.
+// ─────────────────────────────────────────────
+
+let BIZ_ID = localStorage.getItem('ap_biz_id') || null;
+
+// LocalStorage fallback (used for session + config only)
+const ls = {
+  get:(k,d=null)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d;}catch{return d;}},
+  set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+};
+
+// Firestore helpers
+async function fbSet(path, data){
+  data._updatedAt = serverTimestamp();
+  await setDoc(doc(db, path), data, {merge:true});
+}
+async function fbGet(path){
+  const snap = await getDoc(doc(db, path));
+  return snap.exists() ? snap.data() : null;
+}
+async function fbDel(path){
+  await deleteDoc(doc(db, path));
+}
+async function fbAdd(colPath, data){
+  data._createdAt = serverTimestamp();
+  const ref = await addDoc(collection(db, colPath), data);
+  return ref.id;
+}
+async function fbList(colPath, ...constraints){
+  const q = constraints.length
+    ? query(collection(db, colPath), ...constraints)
+    : collection(db, colPath);
+  const snap = await getDocs(q);
+  return snap.docs.map(d=>({id:d.id,...d.data()}));
+}
+function fbLive(path, cb){
+  return onSnapshot(doc(db, path), snap=>{
+    cb(snap.exists()?snap.data():null);
+  });
+}
+function fbLiveCol(colPath, cb, ...constraints){
+  const q = constraints.length
+    ? query(collection(db, colPath), ...constraints)
+    : collection(db, colPath);
+  return onSnapshot(q, snap=>{
+    cb(snap.docs.map(d=>({id:d.id,...d.data()})));
+  });
+}
+
+// Business-scoped paths
+const p = {
+  biz:       ()=>`businesses/${BIZ_ID}`,
+  staff:     ()=>`businesses/${BIZ_ID}/staff`,
+  staffDoc:  (sid)=>`businesses/${BIZ_ID}/staff/${sid}`,
+  settings:  ()=>`businesses/${BIZ_ID}/settings/main`,
+  rec:       (sid,date)=>`businesses/${BIZ_ID}/attendance/${sid}_${date}`,
+  recs:      ()=>`businesses/${BIZ_ID}/attendance`,
+  day:       (date,sid)=>`businesses/${BIZ_ID}/days/${date}${sid?'_'+sid:''}`,
+  days:      ()=>`businesses/${BIZ_ID}/days`,
+  requests:  ()=>`businesses/${BIZ_ID}/requests`,
+  reqDoc:    (id)=>`businesses/${BIZ_ID}/requests/${id}`,
+  advances:  ()=>`businesses/${BIZ_ID}/advances`,
+  advDoc:    (id)=>`businesses/${BIZ_ID}/advances/${id}`,
+  salary:    (sid)=>`businesses/${BIZ_ID}/salary_config/${sid}`,
+  payment:   (sid,month)=>`businesses/${BIZ_ID}/payments/${sid}_${month}`,
+  payHist:   ()=>`businesses/${BIZ_ID}/payment_history`,
+};
+
+// ─────────────────────────────────────────────
+//  APP STATE
+// ─────────────────────────────────────────────
+let biz           = null;
+let staffArr      = [];
+let settings      = {punchInTime:'10:00'};
+let currentStaff  = null;
+let pinBuf='', pinTempStaff=null;
+let punchAction='in', capturedSelfie=null, qrScanner=null;
+let clockTick=null, reportMonthOff=0, myMonthOff=0;
+let editingSalaryStaffId=null;
+let unsubListeners = [];
+const STORE_QR = 'ATTENDPRO_STORE_QR_2024';
+const session = ()=>ls.get('ap_session',null);
+const saveSession = (v)=>ls.set('ap_session',v);
+
+// ─────────────────────────────────────────────
+//  BOOT
+// ─────────────────────────────────────────────
+async function boot(){
+  hideSplash();
+  // Check if business exists in localStorage (fast path)
+  BIZ_ID = localStorage.getItem('ap_biz_id');
+  if(!BIZ_ID){ showScreen('screen-landing'); return; }
+
+  setLoading(true,'Loading your business…');
+  try {
+    biz = await fbGet(p.biz());
+    if(!biz){ localStorage.removeItem('ap_biz_id'); showScreen('screen-landing'); setLoading(false); return; }
+    const sett = await fbGet(p.settings());
+    if(sett) settings = sett;
+    staffArr = await fbList(p.staff());
+  } catch(e){
+    // Offline fallback — use cached data
+    biz = ls.get('ap_biz_cache');
+    staffArr = ls.get('ap_staff_cache',[]);
+    settings = ls.get('ap_settings_cache',{punchInTime:'10:00'});
+    if(!biz){ showScreen('screen-landing'); setLoading(false); return; }
+    toast('⚠️ Offline mode — showing cached data');
+  }
+  setLoading(false);
+
+  const sess = session();
+  if(sess?.staffId){
+    const s = staffArr.find(x=>x.id===sess.staffId&&x.active);
+    if(s){ currentStaff=s; openStaffDashboard(); return; }
+  }
+  document.getElementById('login-biz-name').textContent=biz.name;
+  showScreen('screen-login');
+}
+
+function hideSplash(){
+  setTimeout(()=>{
+    const sp=document.getElementById('splash');
+    if(sp){sp.style.opacity='0';setTimeout(()=>sp.remove(),500);}
+  },1200);
+}
+
+// ─────────────────────────────────────────────
+//  SETUP
+// ─────────────────────────────────────────────
+window.completeSetup = async function(){
+  const name  = v('setup-biz-name');
+  const loc   = v('setup-biz-loc');
+  const pt    = v('setup-punch-time');
+  const ou    = v('setup-owner-user').toLowerCase();
+  const op    = v('setup-owner-pass');
+  if(!name)      return toast('Enter business name',true);
+  if(!ou)        return toast('Enter owner username',true);
+  if(!op||op.length<4) return toast('Password must be 4+ characters',true);
+
+  setLoading(true,'Creating your business…');
+  try {
+    // Generate unique biz ID
+    BIZ_ID = 'biz_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
+    localStorage.setItem('ap_biz_id', BIZ_ID);
+    biz = {name, location:loc, ownerUser:ou, ownerPass:op, createdAt:new Date().toISOString()};
+    settings = {punchInTime:pt||'10:00'};
+    await fbSet(p.biz(), biz);
+    await fbSet(p.settings(), settings);
+    // Cache locally
+    ls.set('ap_biz_cache',biz);
+    ls.set('ap_settings_cache',settings);
+    setLoading(false);
+    document.getElementById('login-biz-name').textContent=biz.name;
+    toast('✓ Business created!');
+    showScreen('screen-login');
+  } catch(e){
+    setLoading(false);
+    toast('Error creating business: '+e.message, true);
+  }
+};
+
+// ─────────────────────────────────────────────
+//  STAFF LOGIN
+// ─────────────────────────────────────────────
+window.submitUsername = function(){
+  const u = v('login-username').toLowerCase();
+  if(!u) return toast('Enter username',true);
+  const s = staffArr.find(x=>x.username?.toLowerCase()===u&&x.active);
+  if(!s) return toast('Username not found',true);
+  pinTempStaff=s;
+  document.getElementById('pin-hi').textContent='Hi '+s.name+'!';
+  pinBuf=''; updateDots();
+  document.getElementById('login-step-user').style.display='none';
+  document.getElementById('login-step-pin').style.display='block';
+};
+window.backToUser=function(){
+  pinBuf='';pinTempStaff=null;updateDots();
+  document.getElementById('login-username').value='';
+  document.getElementById('login-step-pin').style.display='none';
+  document.getElementById('login-step-user').style.display='block';
+};
+window.pinKey=function(k){if(pinBuf.length>=4)return;pinBuf+=k;updateDots();if(pinBuf.length===4)setTimeout(checkPin,120);};
+window.pinDel=function(){pinBuf=pinBuf.slice(0,-1);updateDots();};
+function updateDots(){for(let i=0;i<4;i++)document.getElementById('pd'+i).classList.toggle('on',i<pinBuf.length);}
+function checkPin(){
+  if(pinBuf===String(pinTempStaff.pin)){
+    currentStaff=pinTempStaff;
+    saveSession({staffId:currentStaff.id});
+    document.getElementById('login-username').value='';
+    document.getElementById('login-step-pin').style.display='none';
+    document.getElementById('login-step-user').style.display='block';
+    pinBuf='';pinTempStaff=null;
+    openStaffDashboard();
+  } else {
+    document.getElementById('pin-grid').classList.add('pin-shake');
+    setTimeout(()=>document.getElementById('pin-grid').classList.remove('pin-shake'),400);
+    pinBuf='';updateDots();toast('Wrong PIN',true);
+  }
+}
+
+// ─────────────────────────────────────────────
+//  STAFF DASHBOARD
+// ─────────────────────────────────────────────
+function openStaffDashboard(){
+  document.getElementById('staff-top-name').textContent=currentStaff.name;
+  document.getElementById('staff-top-biz').textContent=biz.name+(biz.location?' · '+biz.location:'');
+  showStaffTab('home',null);
+  showScreen('screen-staff');
+  startClock();
+  renderStaffStatus();
+  updateStaffReqBadge();
+}
+
+window.showStaffTab=function(tab,btn){
+  document.querySelectorAll('#screen-staff .page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('staff-'+tab).classList.add('active');
+  document.querySelectorAll('#staff-tabs .tab').forEach(t=>t.classList.remove('active'));
+  if(btn)btn.classList.add('active');
+  else document.querySelector('#staff-tabs .tab')?.classList.add('active');
+  if(tab==='home'){stopQR();stopCamera();resetPunchSteps();renderStaffStatus();}
+  if(tab==='requests')renderStaffRequests();
+  if(tab==='history')renderMyHistory();
+};
+
+async function renderStaffStatus(){
+  const today=todayStr();
+  let rec=null;
+  try{rec=await fbGet(p.rec(currentStaff.id,today));}
+  catch{rec=ls.get('ap_rec_cache_'+currentStaff.id+'_'+today);}
+  const btn=document.getElementById('staff-punch-btn');
+  const content=document.getElementById('staff-status-content');
+  btn.className='punch-btn';
+  if(!rec){
+    punchAction='in';
+    content.innerHTML=`<span class="chip chip-grey">Not yet punched in today</span>`;
+    btn.classList.add('punch-btn-in');btn.textContent='↓ Punch In';
+  } else if(rec.inTime&&!rec.outTime){
+    punchAction='out';
+    content.innerHTML=`<span class="chip chip-green">Punched In</span>${rec.late?' <span class="late-tag">LATE</span>':''}<div style="font-size:12px;color:var(--muted);margin-top:6px">In: ${rec.inTime}</div>`;
+    btn.classList.add('punch-btn-out');btn.textContent='↑ Punch Out';
+  } else {
+    punchAction='done';
+    content.innerHTML=`<span class="chip chip-blue">Completed ✓</span><div style="font-size:12px;color:var(--muted);margin-top:6px">In: ${rec.inTime} · Out: ${rec.outTime}</div>`;
+    btn.classList.add('punch-btn-done');btn.textContent='All done today ✓';
+  }
+}
+
+window.staffLogout=function(){
+  stopQR();stopCamera();
+  saveSession(null);currentStaff=null;pinBuf='';
+  document.getElementById('login-username').value='';
+  document.getElementById('login-biz-name').textContent=biz.name;
+  showScreen('screen-login');
+};
+
+// ─────────────────────────────────────────────
+//  PUNCH FLOW
+// ─────────────────────────────────────────────
+window.startPunchFlow=function(){
+  if(punchAction==='done')return;
+  document.getElementById('staff-status-card').style.display='none';
+  document.getElementById('staff-punch-btn').style.display='none';
+  document.getElementById('punch-qr-wrap').style.display='block';
+  startQR();
+};
+window.cancelPunchFlow=function(){stopQR();stopCamera();resetPunchSteps();};
+function resetPunchSteps(){
+  ['punch-qr-wrap','punch-selfie-wrap','punch-success-wrap'].forEach(id=>document.getElementById(id).style.display='none');
+  document.getElementById('staff-status-card').style.display='block';
+  document.getElementById('staff-punch-btn').style.display='flex';
+  document.getElementById('selfie-video').style.display='none';
+  document.getElementById('selfie-preview').style.display='none';
+  document.getElementById('capture-btn').style.display='flex';
+  document.getElementById('retake-btn').style.display='none';
+  document.getElementById('confirm-btn').style.display='none';
+}
+function startQR(){
+  if(qrScanner){try{qrScanner.stop();}catch(e){}qrScanner=null;}
+  document.getElementById('qr-scanner-div').innerHTML='';
+  qrScanner=new Html5Qrcode('qr-scanner-div');
+  qrScanner.start({facingMode:'environment'},{fps:10,qrbox:{width:180,height:180}},
+    d=>{if(d===STORE_QR){stopQR();showSelfieStep();}else toast('❌ Wrong QR',true);},
+    ()=>{}
+  ).catch(()=>toast('Camera unavailable — tap Skip',true));
+}
+window.skipQR=function(){stopQR();showSelfieStep();};
+function stopQR(){if(qrScanner){try{qrScanner.stop();}catch(e){}qrScanner=null;}}
+function showSelfieStep(){
+  document.getElementById('punch-qr-wrap').style.display='none';
+  document.getElementById('punch-selfie-wrap').style.display='block';
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false})
+    .then(stream=>{const vid=document.getElementById('selfie-video');vid.srcObject=stream;vid.style.display='block';})
+    .catch(()=>toast('Camera permission denied',true));
+}
+window.captureSelfie=function(){
+  const vid=document.getElementById('selfie-video'),c=document.getElementById('selfie-canvas');
+  c.width=vid.videoWidth||320;c.height=vid.videoHeight||240;
+  const ctx=c.getContext('2d');ctx.save();ctx.scale(-1,1);ctx.drawImage(vid,-c.width,0);ctx.restore();
+  capturedSelfie=c.toDataURL('image/jpeg',0.5);
+  document.getElementById('selfie-preview').src=capturedSelfie;
+  document.getElementById('selfie-preview').style.display='block';
+  document.getElementById('selfie-video').style.display='none';
+  document.getElementById('capture-btn').style.display='none';
+  document.getElementById('retake-btn').style.display='flex';
+  document.getElementById('confirm-btn').style.display='flex';
+};
+window.retakeSelfie=function(){
+  capturedSelfie=null;
+  document.getElementById('selfie-preview').style.display='none';
+  document.getElementById('selfie-video').style.display='block';
+  document.getElementById('capture-btn').style.display='flex';
+  document.getElementById('retake-btn').style.display='none';
+  document.getElementById('confirm-btn').style.display='none';
+};
+window.confirmPunch=async function(){
+  stopCamera();
+  const now=new Date(),ts=formatTime(now),today=todayStr();
+  const key=p.rec(currentStaff.id,today);
+  let rec=null;
+  try{rec=await fbGet(key);}catch{}
+  if(!rec) rec={staffId:currentStaff.id,staffName:currentStaff.name,date:today};
+  if(punchAction==='in'){rec.inTime=ts;rec.inSelfie=capturedSelfie;rec.late=isLate(now,currentStaff);}
+  else{rec.outTime=ts;rec.outSelfie=capturedSelfie;}
+  try{
+    await fbSet(key,rec);
+    ls.set('ap_rec_cache_'+currentStaff.id+'_'+today,rec); // local cache
+  }catch{
+    ls.set('ap_rec_cache_'+currentStaff.id+'_'+today,rec);
+    toast('⚠️ Saved locally — will sync when online');
+  }
+  capturedSelfie=null;
+  document.getElementById('punch-selfie-wrap').style.display='none';
+  document.getElementById('punch-success-wrap').style.display='block';
+  document.getElementById('success-title').textContent=punchAction==='in'?'✓ Punched In!':'✓ Punched Out!';
+  document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late today':''}`;
+};
+window.afterPunchDone=function(){resetPunchSteps();renderStaffStatus();};
+function stopCamera(){const vid=document.getElementById('selfie-video');if(vid?.srcObject){vid.srcObject.getTracks().forEach(t=>t.stop());vid.srcObject=null;}}
+
+// ─────────────────────────────────────────────
+//  LEAVE REQUESTS (staff)
+// ─────────────────────────────────────────────
+window.openLeaveRequest=function(){
+  const today=new Date().toISOString().split('T')[0];
+  document.getElementById('lr-from').value=today;
+  document.getElementById('lr-to').value=today;
+  document.getElementById('lr-reason').value='';
+  document.getElementById('lr-type').value='full';
+  toggleLeaveHours();
+  openSheet('sheet-leave-req');
+};
+window.toggleLeaveHours=function(){
+  document.getElementById('lr-hours-grp').style.display=document.getElementById('lr-type').value==='custom'?'block':'none';
+};
+window.submitLeaveRequest=async function(){
+  const type=v('lr-type'),from=v('lr-from'),to=v('lr-to'),reason=v('lr-reason');
+  if(!from||!to)return toast('Select dates',true);
+  if(!reason)return toast('Enter a reason',true);
+  const req={
+    type:'leave',leaveType:type,
+    staffId:currentStaff.id,staffName:currentStaff.name,
+    from,to,reason,status:'pending',ts:Date.now(),
+    ...(type==='custom'?{timeFrom:v('lr-time-from'),timeTo:v('lr-time-to')}:{})
+  };
+  try{
+    await fbAdd(p.requests(),req);
+    closeSheet('sheet-leave-req');
+    renderStaffRequests();updateStaffReqBadge();
+    toast('✓ Leave request submitted');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+// ─────────────────────────────────────────────
+//  ADVANCE REQUESTS (staff)
+// ─────────────────────────────────────────────
+window.openAdvanceRequest=function(){
+  document.getElementById('ar-amount').value='';
+  document.getElementById('ar-reason').value='';
+  openSheet('sheet-advance-req');
+};
+window.submitAdvanceRequest=async function(){
+  const amount=parseInt(v('ar-amount')),reason=v('ar-reason');
+  if(!amount||amount<=0)return toast('Enter valid amount',true);
+  if(!reason)return toast('Enter a reason',true);
+  const req={type:'advance',staffId:currentStaff.id,staffName:currentStaff.name,amount,reason,status:'pending',ts:Date.now()};
+  try{
+    await fbAdd(p.requests(),req);
+    closeSheet('sheet-advance-req');
+    renderStaffRequests();updateStaffReqBadge();
+    toast('✓ Advance request submitted');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+async function renderStaffRequests(){
+  setLoading(true,'Loading requests…');
+  try{
+    const all=await fbList(p.requests(),where('staffId','==',currentStaff.id),orderBy('ts','desc'));
+    const el=document.getElementById('staff-req-list');
+    if(!all.length){el.innerHTML='<div class="empty-state"><div class="emoji">📭</div>No requests yet.<br>Use the buttons above.</div>';setLoading(false);return;}
+    el.innerHTML=all.map(r=>reqCardHtml(r,false)).join('');
+  }catch(e){document.getElementById('staff-req-list').innerHTML='<div class="empty-state">Error loading requests</div>';}
+  setLoading(false);
+}
+
+function updateStaffReqBadge(){
+  // count pending for this staff
+  fbList(p.requests(),where('staffId','==',currentStaff?.id||'x'),where('status','==','pending'))
+    .then(arr=>{
+      const tab=document.getElementById('staff-req-tab');if(!tab)return;
+      let b=tab.querySelector('.tab-badge');
+      if(arr.length>0){if(!b){b=document.createElement('span');b.className='tab-badge';tab.appendChild(b);}b.textContent=arr.length;}
+      else if(b)b.remove();
+    }).catch(()=>{});
+}
+
+// ─────────────────────────────────────────────
+//  MY HISTORY
+// ─────────────────────────────────────────────
+async function renderMyHistory(){
+  const now=new Date(),d=new Date(now.getFullYear(),now.getMonth()+myMonthOff,1);
+  document.getElementById('my-month-lbl').textContent=d.toLocaleString('default',{month:'long',year:'numeric'});
+  setLoading(true,'Loading history…');
+  try{
+    const prefix=`${d.getFullYear()}-${pad(d.getMonth()+1)}`;
+    const all=await fbList(p.recs(),where('staffId','==',currentStaff.id));
+    const recs={}; all.filter(r=>r.date?.startsWith(prefix)).forEach(r=>recs[r.id]=r);
+    const marksAll=await fbList(p.days());
+    const marks={}; marksAll.filter(m=>m.date?.startsWith(prefix)&&(!m.staffId||m.staffId===currentStaff.id)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
+    drawCal('my-cal',d.getFullYear(),d.getMonth(),currentStaff.id,recs,marks);
+    drawStats('my-stats',currentStaff.id,d.getFullYear(),d.getMonth(),recs,marks);
+    const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,20);
+    document.getElementById('my-log').innerHTML=list.length?list.map(r=>`
+      <div class="row"><div class="row-main"><div class="row-title">${r.date}${r.late?' <span class="late-tag">LATE</span>':''}</div><div class="row-sub">In: ${r.inTime||'—'} · Out: ${r.outTime||'—'}</div></div>
+      ${r.inSelfie?`<img class="selfie-thumb" src="${r.inSelfie}" onclick="openSelfieModal('${r.staffName}','${r.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`).join('')
+      :'<div class="empty-state"><div class="emoji">📅</div>No records</div>';
+  }catch(e){document.getElementById('my-log').innerHTML='<div class="empty-state">Error loading history</div>';}
+  setLoading(false);
+}
+window.changeMyMonth=function(d){myMonthOff+=d;renderMyHistory();};
+
+// ─────────────────────────────────────────────
+//  OWNER LOGIN
+// ─────────────────────────────────────────────
+window.goOwnerLogin=function(){
+  document.getElementById('owner-login-wrap').style.display='block';
+  document.getElementById('owner-panel-wrap').style.display='none';
+  showScreen('screen-owner');
+};
+window.backToStaffLogin=function(){
+  document.getElementById('login-biz-name').textContent=biz?.name||'AttendPro';
+  showScreen('screen-login');
+};
+window.ownerLogin=function(){
+  const u=v('owner-user-inp').toLowerCase(),pw=v('owner-pass-inp');
+  if(u===biz.ownerUser&&pw===biz.ownerPass){
+    document.getElementById('owner-login-wrap').style.display='none';
+    document.getElementById('owner-panel-wrap').style.display='block';
+    document.getElementById('owner-biz-title').textContent=biz.name;
+    loadOwnerSettings();renderOwnerToday();populateDropdowns();renderQRCode();updateInboxBadge();
+  }else{toast('Wrong credentials',true);document.getElementById('owner-pass-inp').value='';}
+};
+window.ownerLogout=function(){
+  document.getElementById('owner-login-wrap').style.display='block';
+  document.getElementById('owner-panel-wrap').style.display='none';
+  document.getElementById('owner-user-inp').value='';
+  document.getElementById('owner-pass-inp').value='';
+  if(currentStaff)openStaffDashboard();
+  else{document.getElementById('login-biz-name').textContent=biz.name;showScreen('screen-login');}
+};
+
+// ─────────────────────────────────────────────
+//  OWNER TABS
+// ─────────────────────────────────────────────
+window.showOwnerTab=function(tab,btn){
+  document.querySelectorAll('#owner-panel-wrap .page').forEach(pg=>pg.classList.remove('active'));
+  document.getElementById('owner-'+tab).classList.add('active');
+  document.querySelectorAll('#owner-tabs .tab').forEach(b=>b.classList.remove('active'));
+  if(btn)btn.classList.add('active');
+  if(tab==='today')renderOwnerToday();
+  if(tab==='inbox')renderInbox();
+  if(tab==='reports')renderReport();
+  if(tab==='payroll'){populatePayrollDropdowns();renderPayHistory();renderAdvList();}
+  if(tab==='staff')renderStaffList();
+  if(tab==='settings')loadOwnerSettings();
+  if(tab==='qr')renderQRCode();
+};
+
+// ─────────────────────────────────────────────
+//  OWNER TODAY
+// ─────────────────────────────────────────────
+async function renderOwnerToday(){
+  const today=todayStr();
+  setLoading(true,'Loading today…');
+  try{
+    const allRecs=await fbList(p.recs(),where('date','==',today));
+    const recs={}; allRecs.forEach(r=>recs[r.staffId+'_'+r.date]=r);
+    const [lh,lm]=settings.punchInTime.split(':').map(Number);
+    const now=new Date(),pastLimit=now.getHours()>lh||(now.getHours()===lh&&now.getMinutes()>lm);
+    const active=staffArr.filter(s=>s.active);
+    let html=`<div class="card"><div class="card-title">Today — ${today}</div>`;
+    if(!active.length)html+=`<p style="font-size:13px;color:var(--muted)">No staff yet. Go to Staff tab.</p>`;
+    active.forEach(s=>{
+      const rec=recs[s.id+'_'+today];
+      let status=`<span class="chip chip-red">Not In</span>`;
+      if(rec?.inTime&&rec?.outTime)status=`<span class="chip chip-blue">Done</span>`;
+      else if(rec?.inTime)status=`<span class="chip chip-green">In</span>`;
+      html+=`<div class="row"><div class="row-main"><div class="row-title">${s.name}${rec?.late?' <span class="late-tag">LATE</span>':''}</div><div class="row-sub">In: ${rec?.inTime||'—'} · Out: ${rec?.outTime||'—'}</div></div>${status}
+      ${rec?.inSelfie?`<img class="selfie-thumb" src="${rec.inSelfie}" onclick="openSelfieModal('${s.name}','${rec.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`;
+    });
+    const late=active.filter(s=>recs[s.id+'_'+today]?.late).map(s=>s.name);
+    if(late.length)html+=`<div class="divider"></div><div style="color:var(--accent2);font-size:12px;font-weight:700">⚠️ Late: ${late.join(', ')}</div>`;
+    const notIn=active.filter(s=>!recs[s.id+'_'+today]).map(s=>s.name);
+    if(notIn.length&&pastLimit)html+=`<div style="color:var(--red);font-size:12px;font-weight:700;margin-top:6px">❌ Not in: ${notIn.join(', ')}</div>`;
+    html+=`</div>`;
+    document.getElementById('owner-today-content').innerHTML=html;
+  }catch(e){document.getElementById('owner-today-content').innerHTML='<div class="empty-state">Error loading data</div>';}
+  setLoading(false);
+}
+
+// ─────────────────────────────────────────────
+//  INBOX
+// ─────────────────────────────────────────────
+async function renderInbox(){
+  setLoading(true,'Loading requests…');
+  try{
+    const reqs=await fbList(p.requests(),orderBy('ts','desc'));
+    const pending=reqs.filter(r=>r.status==='pending');
+    const others=reqs.filter(r=>r.status!=='pending').slice(0,20);
+    let html='';
+    if(pending.length){
+      html+=`<div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">Pending (${pending.length})</div>`;
+      html+=pending.map(r=>reqCardHtml(r,true)).join('');
+    }
+    if(others.length){
+      html+=`<div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin:16px 0 10px">Recent</div>`;
+      html+=others.map(r=>reqCardHtml(r,true)).join('');
+    }
+    if(!html)html='<div class="empty-state"><div class="emoji">📭</div>No requests yet</div>';
+    document.getElementById('inbox-content').innerHTML=html;
+  }catch(e){document.getElementById('inbox-content').innerHTML='<div class="empty-state">Error loading inbox</div>';}
+  setLoading(false);
+  updateInboxBadge();
+}
+
+async function updateInboxBadge(){
+  try{
+    const pending=await fbList(p.requests(),where('status','==','pending'));
+    const tab=document.getElementById('owner-inbox-tab');if(!tab)return;
+    let b=tab.querySelector('.tab-badge');
+    if(pending.length>0){if(!b){b=document.createElement('span');b.className='tab-badge';tab.appendChild(b);}b.textContent=pending.length;}
+    else if(b)b.remove();
+  }catch{}
+}
+
+function reqCardHtml(r,isOwner){
+  const isLeave=r.type==='leave';
+  const statusHtml=r.status==='pending'?`<span class="status-pending">Pending</span>`:r.status==='approved'?`<span class="status-approved">✓ Approved</span>`:`<span class="status-rejected">✗ Rejected</span>`;
+  const meta=isLeave?`${r.leaveType==='full'?'Full Day':r.leaveType==='half'?'Half Day':'Custom Hours'} · ${r.from}${r.to&&r.to!==r.from?' → '+r.to:''}`:`₹${r.amount?.toLocaleString('en-IN')}`;
+  const actionsHtml=isOwner&&r.status==='pending'?`<div class="req-card-actions"><button class="btn btn-green btn-xs" onclick="approveReq('${r.id}')">✓ Approve</button><button class="btn btn-red btn-xs" onclick="rejectReq('${r.id}')">✗ Reject</button></div>`:'';
+  const noteHtml=r.ownerNote?`<div style="font-size:11px;color:var(--muted);margin-top:4px">Note: ${r.ownerNote}</div>`:'';
+  return `<div class="req-card req-type-${r.type}">
+    <div class="req-card-head"><span class="req-card-title">${isLeave?'📋 Leave':'💵 Advance'} — ${r.staffName}</span>${statusHtml}</div>
+    <div class="req-card-meta">${meta} · ${r.reason}</div>
+    ${noteHtml}${actionsHtml}</div>`;
+}
+
+window.approveReq=async function(id){
+  setLoading(true,'Approving…');
+  try{
+    const all=await fbList(p.requests(),where('ts','>',0));
+    const r=all.find(x=>x.id===id);if(!r){setLoading(false);return;}
+    await updateDoc(doc(db,p.reqDoc(id)),{status:'approved',actionDate:new Date().toLocaleDateString('en-IN')});
+    if(r.type==='advance'){
+      await fbAdd(p.advances(),{staffId:r.staffId,staffName:r.staffName,amount:r.amount,date:new Date().toISOString().split('T')[0],note:'Approved: '+r.reason,recovered:false,fromRequest:id});
+    }
+    if(r.type==='leave'){
+      const days=getDayRange(r.from,r.to);
+      const batch=writeBatch(db);
+      days.forEach(ds=>{
+        const ref=doc(db,p.day(ds,r.staffId));
+        batch.set(ref,{type:'leave',staffId:r.staffId,date:ds,note:r.reason,leaveType:r.leaveType,approved:true,_updatedAt:serverTimestamp()},{merge:true});
+      });
+      await batch.commit();
+    }
+    toast('✓ Approved');renderInbox();updateInboxBadge();
+  }catch(e){toast('Error: '+e.message,true);}
+  setLoading(false);
+};
+
+window.rejectReq=async function(id){
+  const note=prompt('Reason for rejection (optional):');
+  setLoading(true,'Rejecting…');
+  try{
+    await updateDoc(doc(db,p.reqDoc(id)),{status:'rejected',ownerNote:note||'',actionDate:new Date().toLocaleDateString('en-IN')});
+    toast('Rejected');renderInbox();updateInboxBadge();
+  }catch(e){toast('Error: '+e.message,true);}
+  setLoading(false);
+};
+
+function getDayRange(from,to){
+  const days=[];let d=new Date(from);const end=new Date(to);
+  while(d<=end){days.push(d.toISOString().split('T')[0]);d.setDate(d.getDate()+1);}
+  return days;
+}
+
+// ─────────────────────────────────────────────
+//  REPORTS
+// ─────────────────────────────────────────────
+window.renderReport=async function(){
+  const sid=v('report-staff');
+  const now=new Date(),d=new Date(now.getFullYear(),now.getMonth()+reportMonthOff,1);
+  document.getElementById('report-month-lbl').textContent=d.toLocaleString('default',{month:'long',year:'numeric'});
+  setLoading(true,'Loading report…');
+  try{
+    const prefix=`${d.getFullYear()}-${pad(d.getMonth()+1)}`;
+    let recsAll=sid==='all'
+      ? await fbList(p.recs(),where('date','>=',prefix+'-01'),where('date','<=',prefix+'-31'))
+      : await fbList(p.recs(),where('staffId','==',sid),where('date','>=',prefix+'-01'),where('date','<=',prefix+'-31'));
+    const recs={};recsAll.forEach(r=>recs[r.staffId+'_'+r.date]=r);
+    const marksAll=await fbList(p.days());
+    const marks={};marksAll.filter(m=>m.date?.startsWith(prefix)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
+    drawCal('report-cal',d.getFullYear(),d.getMonth(),sid==='all'?null:sid,recs,marks);
+    if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks);
+    else document.getElementById('report-stats').innerHTML='';
+    const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,30);
+    document.getElementById('report-log').innerHTML=list.length?list.map(r=>`
+      <div class="row"><div class="row-main"><div class="row-title">${r.staffName}${r.late?' <span class="late-tag">LATE</span>':''}${r.manual?' <span style="font-size:10px;color:var(--muted)">(manual)</span>':''}</div>
+      <div class="row-sub">${r.date} · In: ${r.inTime||'—'} · Out: ${r.outTime||'—'}</div></div>
+      ${r.inSelfie?`<img class="selfie-thumb" src="${r.inSelfie}" onclick="openSelfieModal('${r.staffName}','${r.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`).join('')
+      :'<div class="empty-state"><div class="emoji">📅</div>No records</div>';
+  }catch(e){document.getElementById('report-log').innerHTML='<div class="empty-state">Error: '+e.message+'</div>';}
+  setLoading(false);
+};
+window.changeReportMonth=function(d){reportMonthOff+=d;renderReport();};
+
+// ─────────────────────────────────────────────
+//  PAYROLL ENGINE
+// ─────────────────────────────────────────────
+async function getSalaryCfg(sid){
+  try{const cfg=await fbGet(p.salary(sid));return cfg||defaultSalaryCfg();}
+  catch{return ls.get('ap_salary_'+sid,defaultSalaryCfg());}
+}
+function defaultSalaryCfg(){return {base:0,weeklyOff:0,startTime:'10:00',endTime:'21:00',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3};}
+
+function populatePayrollDropdowns(){
+  const active=staffArr.filter(s=>s.active);
+  ['pay-staff-sel','adv-staff-sel'].forEach(id=>{
+    const el=document.getElementById(id);if(!el)return;
+    const cur=el.value;el.innerHTML='<option value="">Select…</option>';
+    active.forEach(s=>el.innerHTML+=`<option value="${s.id}">${s.name}</option>`);
+    if(cur)el.value=cur;
+  });
+  const pm=document.getElementById('pay-month');
+  if(pm&&!pm.value){const n=new Date();pm.value=`${n.getFullYear()}-${pad(n.getMonth()+1)}`;}
+  const ad=document.getElementById('adv-date');
+  if(ad&&!ad.value)ad.value=new Date().toISOString().split('T')[0];
+}
+
+window.renderPayroll=async function(){
+  const sid=v('pay-staff-sel'),mv=v('pay-month');
+  const out=document.getElementById('payroll-output');
+  if(!sid||!mv){out.style.display='none';return;}
+  const [year,month]=[parseInt(mv.split('-')[0]),parseInt(mv.split('-')[1])-1];
+  const staff=staffArr.find(s=>s.id===sid);if(!staff){out.style.display='none';return;}
+  out.style.display='block';
+  setLoading(true,'Calculating payroll…');
+  try{
+    const cfg=await getSalaryCfg(sid);
+    const ml=new Date(year,month,1).toLocaleString('default',{month:'long',year:'numeric'});
+    document.getElementById('pay-hero-month').textContent=ml;
+    const prefix=`${year}-${pad(month+1)}`;
+    const recsAll=await fbList(p.recs(),where('staffId','==',sid),where('date','>=',prefix+'-01'),where('date','<=',prefix+'-31'));
+    const recs={};recsAll.forEach(r=>recs[r.staffId+'_'+r.date]=r);
+    const marksAll=await fbList(p.days());
+    const marks={};marksAll.filter(m=>m.date?.startsWith(prefix)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
+    const dim=new Date(year,month+1,0).getDate();
+    const now=new Date(),isCur=(year===now.getFullYear()&&month===now.getMonth());
+    const upto=isCur?now.getDate():dim;
+    let workDays=0,present=0,absent=0,late=0,offDays=0,otMins=0;
+    const [endH,endM]=cfg.endTime.split(':').map(Number);
+    for(let i=1;i<=upto;i++){
+      const ds=`${year}-${pad(month+1)}-${pad(i)}`;
+      const dow=new Date(year,month,i).getDay();
+      const mark=marks[ds]||(marks[ds+'_'+sid]);
+      if(dow==cfg.weeklyOff||mark?.type==='holiday'||mark?.type==='leave'){offDays++;continue;}
+      workDays++;
+      const rec=recs[`${sid}_${ds}`];
+      if(rec?.inTime){present++;if(rec.late)late++;
+        if(rec.outTime){const[oh,om]=parseTime12(rec.outTime);const diff=(oh*60+om)-(endH*60+endM);if(diff>0)otMins+=diff;}
+      }else absent++;
+    }
+    const perDay=workDays>0?cfg.base/workDays:0;
+    const absentD=Math.round(absent*perDay);
+    let lateD=0;
+    if(cfg.lateRule==='fixed')lateD=late*(cfg.lateAmount||0);
+    else if(cfg.lateRule==='halfday')lateD=Math.floor(late/(cfg.lateHalfAfter||3))*Math.round(perDay/2);
+    const otH=Math.floor(otMins/60),otM=otMins%60;
+    const otPay=Math.round((otMins/60)*(cfg.otRate||0));
+    const incentive=parseInt(v('pay-incentive-inp'))||0;
+    const advRecover=parseInt(v('pay-advance-recover'))||0;
+    const net=Math.max(0,cfg.base+otPay+incentive-absentD-lateD-advRecover);
+    const R=(id,val)=>{const el=document.getElementById(id);if(el)el.textContent=val;};
+    R('pay-net-amount','₹'+net.toLocaleString('en-IN'));R('pb-net','₹'+net.toLocaleString('en-IN'));
+    R('pb-base','₹'+cfg.base.toLocaleString('en-IN'));
+    R('pb-ot','+₹'+otPay.toLocaleString('en-IN'));R('pb-ot-lbl',`Overtime (${otH}h ${otM}m)`);
+    R('pb-incentive','+₹'+incentive.toLocaleString('en-IN'));
+    R('pb-absent-lbl',`Absent (${absent} × ₹${Math.round(perDay)})`);R('pb-absent','−₹'+absentD.toLocaleString('en-IN'));
+    R('pb-late-lbl',`Late (${late}${cfg.lateRule==='fixed'?' × ₹'+cfg.lateAmount:''})`);R('pb-late','−₹'+lateD.toLocaleString('en-IN'));
+    R('pb-advance','−₹'+advRecover.toLocaleString('en-IN'));
+    document.getElementById('pay-att-stats').innerHTML=`
+      <div class="stat-box"><div class="stat-num" style="color:var(--green)">${present}</div><div class="stat-lbl">Present</div></div>
+      <div class="stat-box"><div class="stat-num" style="color:var(--red)">${absent}</div><div class="stat-lbl">Absent</div></div>
+      <div class="stat-box"><div class="stat-num" style="color:var(--accent)">${late}</div><div class="stat-lbl">Late</div></div>
+      <div class="stat-box"><div class="stat-num" style="color:var(--blue)">${offDays}</div><div class="stat-lbl">Paid Off</div></div>`;
+    document.getElementById('pay-ot-detail').textContent=otMins>0?`OT: ${otH}h ${otM}m · ₹${cfg.otRate}/hr · ₹${otPay}`:'No overtime';
+    const payRec=await fbGet(p.payment(sid,mv)).catch(()=>null);
+    const badge=document.getElementById('pay-status-badge');
+    if(badge)badge.innerHTML=payRec?`<span class="status-approved">✓ Paid ${payRec.date} via ${payRec.mode}</span>`:`<span class="status-pending">Unpaid</span>`;
+  }catch(e){toast('Payroll error: '+e.message,true);}
+  setLoading(false);
+};
+
+window.markAsPaid=async function(){
+  const sid=v('pay-staff-sel'),mv=v('pay-month');
+  if(!sid||!mv)return toast('Select staff and month',true);
+  const net=document.getElementById('pb-net').textContent;
+  const mode=v('pay-mode'),note=v('pay-note');
+  const payRec={staffId:sid,staffName:staffArr.find(s=>s.id===sid)?.name,month:mv,net,mode,note,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()};
+  try{
+    await fbSet(p.payment(sid,mv),payRec);
+    await fbAdd(p.payHist(),payRec);
+    renderPayroll();renderPayHistory();toast('✓ Payment marked');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+async function renderPayHistory(){
+  const el=document.getElementById('pay-history-list');if(!el)return;
+  try{
+    const hist=await fbList(p.payHist(),orderBy('ts','desc'));
+    if(!hist.length){el.innerHTML='<p style="color:var(--muted);font-size:13px">No payments yet</p>';return;}
+    el.innerHTML=hist.slice(0,20).map(ph=>`
+      <div class="row"><div class="row-main"><div class="row-title">${ph.staffName} · ${ph.net}</div><div class="row-sub">${ph.month} · ${ph.mode} · ${ph.date}${ph.note?' · '+ph.note:''}</div></div><span class="status-approved">Paid</span></div>`).join('');
+  }catch{el.innerHTML='<p style="color:var(--muted);font-size:13px">Error loading</p>';}
+}
+
+// ─────────────────────────────────────────────
+//  ADVANCE
+// ─────────────────────────────────────────────
+window.giveAdvance=async function(){
+  const sid=v('adv-staff-sel'),amount=parseInt(v('adv-amount')),date=v('adv-date'),note=v('adv-note');
+  if(!sid)return toast('Select staff',true);
+  if(!amount||amount<=0)return toast('Enter valid amount',true);
+  if(!date)return toast('Select date',true);
+  try{
+    await fbAdd(p.advances(),{staffId:sid,staffName:staffArr.find(s=>s.id===sid)?.name,amount,date,note,recovered:false});
+    document.getElementById('adv-amount').value='';document.getElementById('adv-note').value='';
+    renderAdvList();toast('✓ Advance recorded');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+window.openQuickAdvance=function(){
+  const active=staffArr.filter(s=>s.active);
+  const el=document.getElementById('qa-staff');
+  el.innerHTML='<option value="">Select…</option>';
+  active.forEach(s=>el.innerHTML+=`<option value="${s.id}">${s.name}</option>`);
+  document.getElementById('qa-amount').value='';
+  document.getElementById('qa-note').value='';
+  document.getElementById('qa-date').value=new Date().toISOString().split('T')[0];
+  openSheet('sheet-quick-advance');
+};
+
+window.giveQuickAdvance=async function(){
+  const sid=v('qa-staff'),amount=parseInt(v('qa-amount')),date=v('qa-date'),note=v('qa-note');
+  if(!sid)return toast('Select staff',true);
+  if(!amount||amount<=0)return toast('Enter valid amount',true);
+  try{
+    await fbAdd(p.advances(),{staffId:sid,staffName:staffArr.find(s=>s.id===sid)?.name,amount,date,note,recovered:false});
+    closeSheet('sheet-quick-advance');toast('✓ Advance recorded for '+staffArr.find(s=>s.id===sid)?.name);
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+async function renderAdvList(){
+  const el=document.getElementById('adv-list');if(!el)return;
+  try{
+    const advs=await fbList(p.advances(),orderBy('_createdAt','desc'));
+    if(!advs.length){el.innerHTML='<p style="color:var(--muted);font-size:13px">No advances</p>';return;}
+    const pending=advs.filter(a=>!a.recovered).reduce((s,a)=>s+a.amount,0);
+    el.innerHTML=`<div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:10px">Pending: ₹${pending.toLocaleString('en-IN')}</div>`+
+    advs.slice(0,15).map(a=>`
+      <div class="row"><div class="row-main"><div class="row-title">${a.staffName} · ₹${a.amount?.toLocaleString('en-IN')}</div><div class="row-sub">${a.date}${a.note?' · '+a.note:''}</div></div>
+      ${a.recovered?'<span class="status-approved">Recovered</span>':`<button class="btn btn-ghost btn-xs" onclick="markAdvRecovered('${a.id}')">Recovered</button>`}</div>`).join('');
+  }catch{el.innerHTML='<p style="color:var(--muted);font-size:13px">Error loading</p>';}
+}
+
+window.markAdvRecovered=async function(id){
+  try{await updateDoc(doc(db,p.advances()+'/'+id),{recovered:true});renderAdvList();toast('✓ Marked recovered');}
+  catch(e){toast('Error: '+e.message,true);}
+};
+
+// ─────────────────────────────────────────────
+//  STAFF MANAGEMENT
+// ─────────────────────────────────────────────
+window.addStaff=async function(){
+  const name=v('ns-name'),user=v('ns-user').toLowerCase(),pin=v('ns-pin');
+  if(!name)return toast('Enter full name',true);
+  if(!user)return toast('Enter username',true);
+  if(staffArr.find(s=>s.username===user))return toast('Username already taken',true);
+  if(!pin||pin.length!==4||isNaN(pin))return toast('PIN must be 4 digits',true);
+  setLoading(true,'Adding staff…');
+  try{
+    const id=await fbAdd(p.staff(),{name,username:user,pin,active:true});
+    staffArr.push({id,name,username:user,pin,active:true});
+    ls.set('ap_staff_cache',staffArr);
+    document.getElementById('ns-name').value='';
+    document.getElementById('ns-user').value='';
+    document.getElementById('ns-pin').value='';
+    renderStaffList();populateDropdowns();toast('✓ '+name+' added');
+  }catch(e){toast('Error: '+e.message,true);}
+  setLoading(false);
+};
+
+function renderStaffList(){
+  const el=document.getElementById('staff-list-display');if(!el)return;
+  if(!staffArr.length){el.innerHTML='<div class="empty-state"><div class="emoji">👥</div>No staff yet</div>';return;}
+  el.innerHTML=staffArr.map(s=>`
+    <div class="staff-quick-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div><div style="font-weight:700;font-size:15px">${s.name}</div><div style="font-size:12px;color:var(--muted)">@${s.username} · ${s.active?'Active':'Inactive'}</div></div>
+        <span class="${s.active?'status-approved':'status-rejected'}">${s.active?'Active':'Off'}</span>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-xs" onclick="openSalarySettings('${s.id}')">₹ Salary</button>
+        <button class="btn btn-ghost btn-xs" onclick="editPin('${s.id}')">Change PIN</button>
+        <button class="btn btn-ghost btn-xs" onclick="toggleStaff('${s.id}')">${s.active?'Disable':'Enable'}</button>
+      </div>
+    </div>`).join('');
+}
+
+window.toggleStaff=async function(id){
+  const s=staffArr.find(x=>x.id===id);if(!s)return;
+  s.active=!s.active;
+  try{
+    await updateDoc(doc(db,p.staffDoc(id)),{active:s.active});
+    ls.set('ap_staff_cache',staffArr);
+    renderStaffList();populateDropdowns();toast('Updated');
+  }catch(e){s.active=!s.active;toast('Error: '+e.message,true);}
+};
+
+window.editPin=async function(id){
+  const s=staffArr.find(x=>x.id===id);if(!s)return;
+  const np=prompt(`New 4-digit PIN for ${s.name}:`);
+  if(!np||np.length!==4||isNaN(np))return toast('Invalid PIN',true);
+  try{
+    await updateDoc(doc(db,p.staffDoc(id)),{pin:np});
+    s.pin=np;ls.set('ap_staff_cache',staffArr);toast('✓ PIN updated for '+s.name);
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+// ─────────────────────────────────────────────
+//  SALARY SETTINGS
+// ─────────────────────────────────────────────
+window.openSalarySettings=async function(staffId){
+  editingSalaryStaffId=staffId;
+  const s=staffArr.find(x=>x.id===staffId);
+  document.getElementById('salary-sheet-name').textContent=s?.name||'';
+  setLoading(true,'Loading salary config…');
+  const cfg=await getSalaryCfg(staffId);
+  setLoading(false);
+  document.getElementById('ss-base').value=cfg.base||0;
+  document.getElementById('ss-weeklyoff').value=cfg.weeklyOff||0;
+  document.getElementById('ss-otrate').value=cfg.otRate||0;
+  document.getElementById('ss-start').value=cfg.startTime||'10:00';
+  document.getElementById('ss-end').value=cfg.endTime||'21:00';
+  document.getElementById('ss-laterule').value=cfg.lateRule||'fixed';
+  document.getElementById('ss-lateamt').value=cfg.lateAmount||50;
+  document.getElementById('ss-lateafter').value=cfg.lateHalfAfter||3;
+  toggleLateRule();
+  openSheet('sheet-salary');
+};
+window.toggleLateRule=function(){
+  const val=v('ss-laterule');
+  document.getElementById('ss-late-fixed').style.display=val==='fixed'?'block':'none';
+  document.getElementById('ss-late-half').style.display=val==='halfday'?'block':'none';
+};
+window.saveSalarySettings=async function(){
+  if(!editingSalaryStaffId)return;
+  const cfg={base:parseInt(v('ss-base'))||0,weeklyOff:parseInt(v('ss-weeklyoff')),startTime:v('ss-start'),endTime:v('ss-end'),otRate:parseInt(v('ss-otrate'))||0,lateRule:v('ss-laterule'),lateAmount:parseInt(v('ss-lateamt'))||0,lateHalfAfter:parseInt(v('ss-lateafter'))||3};
+  try{
+    await fbSet(p.salary(editingSalaryStaffId),cfg);
+    ls.set('ap_salary_'+editingSalaryStaffId,cfg);
+    const s=staffArr.find(x=>x.id===editingSalaryStaffId);
+    if(s){s._startTime=cfg.startTime;ls.set('ap_staff_cache',staffArr);}
+    closeSheet('sheet-salary');
+    toast('✓ Salary settings saved for '+staffArr.find(x=>x.id===editingSalaryStaffId)?.name);
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+// ─────────────────────────────────────────────
+//  SETTINGS (owner)
+// ─────────────────────────────────────────────
+function loadOwnerSettings(){
+  document.getElementById('set-biz-name').value=biz.name||'';
+  document.getElementById('set-biz-loc').value=biz.location||'';
+  document.getElementById('set-punch-time').value=settings.punchInTime||'10:00';
+  document.getElementById('mark-date').value=new Date().toISOString().split('T')[0];
+  document.getElementById('manual-date').value=new Date().toISOString().split('T')[0];
+  populateDropdowns();
+}
+window.saveBizSettings=async function(){
+  biz.name=v('set-biz-name')||biz.name;
+  biz.location=v('set-biz-loc');
+  settings.punchInTime=v('set-punch-time');
+  try{
+    await fbSet(p.biz(),biz);await fbSet(p.settings(),settings);
+    ls.set('ap_biz_cache',biz);ls.set('ap_settings_cache',settings);
+    document.getElementById('owner-biz-title').textContent=biz.name;
+    toast('✓ Settings saved');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+window.changeOwnerPass=async function(){
+  const np=v('set-owner-pass');
+  if(!np||np.length<4)return toast('Min 4 characters',true);
+  biz.ownerPass=np;
+  try{await fbSet(p.biz(),{ownerPass:np});ls.set('ap_biz_cache',biz);document.getElementById('set-owner-pass').value='';toast('✓ Password updated');}
+  catch(e){toast('Error: '+e.message,true);}
+};
+window.toggleMarkStaff=function(){document.getElementById('mark-staff-grp').style.display=v('mark-type')==='leave'?'block':'none';};
+window.markDay=async function(){
+  const date=v('mark-date'),type=v('mark-type'),note=v('mark-note'),sid=v('mark-staff-sel');
+  if(!date)return toast('Select date',true);
+  const data={type,note,date};if(type==='leave')data.staffId=sid;
+  try{await fbSet(p.day(date,type==='leave'?sid:null),data);toast(`✓ ${date} marked`);document.getElementById('mark-note').value='';}
+  catch(e){toast('Error: '+e.message,true);}
+};
+window.manualEntry=async function(){
+  const sid=v('manual-staff'),date=v('manual-date'),inT=v('manual-in'),outT=v('manual-out');
+  if(!sid||!date||!inT)return toast('Fill Staff, Date & In Time',true);
+  const s=staffArr.find(x=>x.id===sid);
+  const [h,m]=inT.split(':').map(Number),[lh,lm]=settings.punchInTime.split(':').map(Number);
+  try{
+    await fbSet(p.rec(sid,date),{staffId:sid,staffName:s?.name||sid,date,inTime:fmt12(inT),outTime:outT?fmt12(outT):'',late:h>lh||(h===lh&&m>lm),manual:true});
+    toast('✓ Entry saved');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+function populateDropdowns(){
+  const active=staffArr.filter(s=>s.active);
+  ['mark-staff-sel','manual-staff'].forEach(id=>{
+    const el=document.getElementById(id);if(!el)return;
+    el.innerHTML='<option value="">Select…</option>';
+    active.forEach(s=>el.innerHTML+=`<option value="${s.id}">${s.name}</option>`);
+  });
+  const rs=document.getElementById('report-staff');
+  if(rs){const cur=rs.value;rs.innerHTML='<option value="all">All Staff</option>';active.forEach(s=>rs.innerHTML+=`<option value="${s.id}">${s.name}</option>`);if(cur)rs.value=cur;}
+  populatePayrollDropdowns();
+}
+
+// ─────────────────────────────────────────────
+//  QR
+// ─────────────────────────────────────────────
+function renderQRCode(){
+  const el=document.getElementById('qr-render');if(!el)return;
+  el.innerHTML='';
+  try{new QRCode(el,{text:STORE_QR,width:190,height:190,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});}catch(e){}
+  const lbl=document.getElementById('qr-label-text');
+  if(lbl)lbl.textContent=(biz?.name||'AttendPro')+(biz?.location?' · '+biz.location:'');
+}
+window.printQR=function(){
+  const el=document.getElementById('qr-render');
+  const w=window.open('','_blank');
+  w.document.write(`<html><body style="text-align:center;padding:40px;font-family:sans-serif"><h2>${biz?.name}</h2><p style="color:#666;margin-bottom:24px">${biz?.location||''} · Scan to Punch In / Out</p>${el.innerHTML}<p style="color:#999;font-size:12px;margin-top:16px">Staff only</p><script>window.onload=()=>window.print()<\/script></body></html>`);
+  w.document.close();
+};
+
+// ─────────────────────────────────────────────
+//  SALARY SLIP PRINT
+// ─────────────────────────────────────────────
+window.printSalarySlip=function(){
+  const sid=v('pay-staff-sel'),mv=v('pay-month');
+  if(!sid||!mv)return toast('Select staff and month first',true);
+  const staff=staffArr.find(s=>s.id===sid);if(!staff)return;
+  const g=id=>document.getElementById(id)?.textContent||'—';
+  const ml=new Date(parseInt(mv.split('-')[0]),parseInt(mv.split('-')[1])-1,1).toLocaleString('default',{month:'long',year:'numeric'});
+  fbGet(p.payment(sid,mv)).then(payRec=>{
+    const w=window.open('','_blank');
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+*{margin:0;padding:0;box-sizing:border-box;}body{font-family:'Segoe UI',sans-serif;color:#111;}
+.slip{max-width:500px;margin:0 auto;padding:32px 28px;}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;padding-bottom:14px;border-bottom:2px solid #f5a623;}
+.bname{font-size:18px;font-weight:800;}.bsub{font-size:11px;color:#777;margin-top:2px;}
+.srow{background:#f8f8f8;border-radius:10px;padding:12px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;}
+.sname{font-size:15px;font-weight:700;}.ssub{font-size:11px;color:#666;margin-top:2px;}
+.paid{border:2px solid #22c55e;color:#22c55e;padding:3px 12px;border-radius:20px;font-size:11px;font-weight:700;}
+table{width:100%;border-collapse:collapse;margin-bottom:14px;}
+th{font-size:10px;text-transform:uppercase;color:#999;padding:7px 0;text-align:left;border-bottom:1px solid #eee;}
+td{padding:8px 0;font-size:13px;border-bottom:1px solid #f5f5f5;}td.r{text-align:right;font-weight:700;}
+td.g{color:#22c55e;}td.re{color:#ef4444;}
+.net{background:linear-gradient(135deg,#f5a623,#e8522a);border-radius:10px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;margin:14px 0;}
+.nl{color:rgba(255,255,255,.85);font-size:12px;}.nv{color:#fff;font-size:22px;font-weight:800;}
+.foot{text-align:center;font-size:10px;color:#ccc;margin-top:20px;padding-top:12px;border-top:1px solid #eee;}
+@media print{body{print-color-adjust:exact;-webkit-print-color-adjust:exact;}}
+</style></head><body><div class="slip">
+<div class="hdr"><div><div class="bname">${biz.name}</div><div class="bsub">${biz.location||''}</div></div><div style="text-align:right"><div style="font-size:11px;font-weight:700;color:#f5a623;text-transform:uppercase;letter-spacing:1px">Salary Slip</div><div style="font-size:11px;color:#777;margin-top:3px">${ml}</div></div></div>
+<div class="srow"><div><div class="sname">${staff.name}</div><div class="ssub">@${staff.username} · ${ml}</div></div>${payRec?'<div class="paid">PAID</div>':''}</div>
+<table><tr><th>Description</th><th style="text-align:right">Amount</th></tr>
+<tr><td>Base Salary</td><td class="r g">${g('pb-base')}</td></tr>
+<tr><td>${g('pb-ot-lbl')}</td><td class="r g">${g('pb-ot')}</td></tr>
+<tr><td>Sales Incentive</td><td class="r g">${g('pb-incentive')}</td></tr>
+<tr><td>${g('pb-absent-lbl')}</td><td class="r re">${g('pb-absent')}</td></tr>
+<tr><td>${g('pb-late-lbl')}</td><td class="r re">${g('pb-late')}</td></tr>
+<tr><td>Advance Recovered</td><td class="r re">${g('pb-advance')}</td></tr></table>
+<div class="net"><div class="nl">Net Payable</div><div class="nv">${g('pb-net')}</div></div>
+${payRec?`<div style="font-size:11px;color:#777;margin-bottom:8px">Paid: ${payRec.mode} · ${payRec.date}${payRec.note?' · '+payRec.note:''}</div>`:''}
+<div class="foot">AttendPro · ${new Date().toLocaleDateString('en-IN')}</div>
+</div><script>window.onload=()=>window.print()<\/script></body></html>`);
+    w.document.close();
+  }).catch(()=>toast('Error generating slip',true));
+};
+
+// ─────────────────────────────────────────────
+//  SHARED UI HELPERS
+// ─────────────────────────────────────────────
+window.openSelfieModal=function(name,time,src){
+  document.getElementById('selfie-modal-meta').textContent=`${name} · ${time}`;
+  document.getElementById('selfie-modal-img').src=src;
+  document.getElementById('selfie-modal').classList.add('open');
+};
+window.closeSelfieModal=function(){document.getElementById('selfie-modal').classList.remove('open');};
+function openSheet(id){document.getElementById(id).classList.add('open');}
+function closeSheet(id){document.getElementById(id).classList.remove('open');}
+document.querySelectorAll('.sheet-overlay').forEach(el=>{
+  el.addEventListener('click',e=>{if(e.target===el)el.classList.remove('open');});
+});
+
+// ─────────────────────────────────────────────
+//  CALENDAR / STATS HELPERS
+// ─────────────────────────────────────────────
+function drawCal(cid,year,month,sid,recs,marks){
+  const c=document.getElementById(cid);
+  let html=['Su','Mo','Tu','We','Th','Fr','Sa'].map(h=>`<div class="cal-head">${h}</div>`).join('');
+  const first=new Date(year,month,1).getDay();
+  for(let i=0;i<first;i++)html+=`<div></div>`;
+  const dim=new Date(year,month+1,0).getDate(),today=todayStr();
+  for(let d=1;d<=dim;d++){
+    const ds=`${year}-${pad(month+1)}-${pad(d)}`;
+    const mark=marks[ds]||(sid?marks[ds+'_'+sid]:null);
+    const rec=sid?recs[`${sid}_${ds}`]:Object.values(recs).find(r=>r.date===ds);
+    let cls='cal-day';
+    if(ds===today)cls+=' today';
+    if(mark?.type==='holiday')cls+=' holiday';
+    else if(mark?.type==='leave')cls+=mark.leaveType==='half'?' halfday':' leave';
+    else if(rec?.inTime){cls+=' present';if(rec.late)cls+=' late';}
+    else if(ds<today)cls+=' absent';
+    html+=`<div class="${cls}">${d}</div>`;
+  }
+  c.innerHTML=html;
+}
+function drawStats(cid,sid,year,month,recs,marks){
+  const dim=new Date(year,month+1,0).getDate(),now=new Date();
+  const upto=(year===now.getFullYear()&&month===now.getMonth())?now.getDate():dim;
+  let present=0,late=0,absent=0,off=0;
+  for(let i=1;i<=upto;i++){
+    const ds=`${year}-${pad(month+1)}-${pad(i)}`;
+    const mark=marks[ds]||(sid?marks[ds+'_'+sid]:null);
+    if(mark){off++;continue;}
+    const rec=recs[`${sid}_${ds}`];
+    if(rec?.inTime){present++;if(rec.late)late++;}else absent++;
+  }
+  document.getElementById(cid).innerHTML=`
+    <div class="stat-box"><div class="stat-num" style="color:var(--green)">${present}</div><div class="stat-lbl">Present</div></div>
+    <div class="stat-box"><div class="stat-num" style="color:var(--red)">${absent}</div><div class="stat-lbl">Absent</div></div>
+    <div class="stat-box"><div class="stat-num" style="color:var(--accent)">${late}</div><div class="stat-lbl">Late</div></div>
+    <div class="stat-box"><div class="stat-num" style="color:var(--blue)">${off}</div><div class="stat-lbl">Off Days</div></div>`;
+}
+
+// ─────────────────────────────────────────────
+//  LOADING STATE
+// ─────────────────────────────────────────────
+function setLoading(on, msg=''){
+  let el=document.getElementById('loading-bar');
+  if(on){
+    if(!el){el=document.createElement('div');el.id='loading-bar';el.style.cssText='position:fixed;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--accent),var(--accent2));z-index:9999;animation:loadpulse 1s infinite;';document.head.insertAdjacentHTML('beforeend','<style>@keyframes loadpulse{0%{opacity:1}50%{opacity:.4}100%{opacity:1}}</style>');document.body.appendChild(el);}
+  } else { if(el)el.remove(); }
+}
+
+// ─────────────────────────────────────────────
+//  UTILS
+// ─────────────────────────────────────────────
+function startClock(){
+  if(clockTick)clearInterval(clockTick);
+  const tick=()=>{
+    const n=new Date();
+    const ce=document.getElementById('staff-clock'),de=document.getElementById('staff-date');
+    if(ce)ce.textContent=formatTime(n);
+    if(de)de.textContent=n.toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'});
+  };
+  tick();clockTick=setInterval(tick,1000);
+}
+function showScreen(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');}
+function v(id){return document.getElementById(id)?.value?.trim()||'';}
+function todayStr(){const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;}
+function pad(n){return n<10?'0'+n:''+n;}
+function formatTime(d){return fmt12(`${pad(d.getHours())}:${pad(d.getMinutes())}`);}
+function fmt12(t){const [h,m]=t.split(':').map(Number);return `${pad(h%12||12)}:${pad(m)} ${h<12?'AM':'PM'}`;}
+function isLate(d,staff){
+  const cfg=staff?ls.get('ap_salary_'+staff.id,null):null;
+  const t=cfg?.startTime||settings.punchInTime||'10:00';
+  const[h,m]=t.split(':').map(Number);
+  return d.getHours()>h||(d.getHours()===h&&d.getMinutes()>m);
+}
+function parseTime12(t){
+  if(!t)return[0,0];
+  const p2=t.match(/(\d+):(\d+)\s*(AM|PM)/i);if(!p2)return[0,0];
+  let h=parseInt(p2[1]),m=parseInt(p2[2]);
+  if(p2[3].toUpperCase()==='PM'&&h!==12)h+=12;
+  if(p2[3].toUpperCase()==='AM'&&h===12)h=0;
+  return[h,m];
+}
+function toast(msg,err=false){
+  const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';
+  t.style.borderColor=err?'var(--red)':'var(--green)';t.style.color=err?'var(--red)':'var(--green)';
+  clearTimeout(window._tt);window._tt=setTimeout(()=>t.style.display='none',3000);
+}
+
+// ─────────────────────────────────────────────
+//  KICK OFF
+// ─────────────────────────────────────────────
+boot();
+</script>
+
+</head>
+<body>
+
+<!-- ══ TOAST ══ -->
+<div id="toast" style="position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:#13131a;border:1px solid;border-radius:30px;padding:11px 22px;font-size:13px;font-weight:600;z-index:9999;white-space:nowrap;display:none;box-shadow:0 8px 32px rgba(0,0,0,.6);font-family:'DM Sans',sans-serif;"></div>
+
+<!-- ══ SPLASH ══ -->
+<div id="splash" style="position:fixed;inset:0;z-index:999;background:#0a0a0f;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;transition:opacity .5s;">
+  <div style="width:88px;height:88px;background:linear-gradient(135deg,#f5a623,#e8522a);border-radius:26px;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-size:32px;font-weight:800;color:#fff;box-shadow:0 0 56px rgba(245,166,35,.45);animation:popIn .7s cubic-bezier(.175,.885,.32,1.275) both;">AP</div>
+  <div style="font-family:'Syne',sans-serif;font-size:24px;font-weight:800;color:#f0f0f5;">AttendPro</div>
+  <div style="color:#7070a0;font-size:13px;font-family:'DM Sans',sans-serif;">Staff Management Platform</div>
+</div>
+
+<!-- ══ SELFIE MODAL ══ -->
+<div id="selfie-modal" style="position:fixed;inset:0;z-index:700;background:rgba(0,0,0,.85);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:20px;">
+  <div style="background:#13131a;border:1px solid #2a2a3a;border-radius:16px;padding:22px;width:100%;max-width:400px;">
+    <h3 style="font-family:'Syne',sans-serif;margin-bottom:5px;color:#f0f0f5;">Selfie Proof</h3>
+    <p style="font-size:13px;color:#7070a0;margin-bottom:14px;font-family:'DM Sans',sans-serif;" id="selfie-modal-meta"></p>
+    <img id="selfie-modal-img" src="" alt="selfie" style="width:100%;border-radius:10px;margin-bottom:14px;display:block;">
+    <button onclick="closeSelfieModal()" style="width:100%;padding:14px;background:#1c1c28;border:1.5px solid #2a2a3a;border-radius:10px;color:#f0f0f5;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer;">Close</button>
+  </div>
+</div>
+
+<style>
+:root{
+  --bg:#0a0a0f;--s1:#13131a;--s2:#1c1c28;--s3:#242436;--border:#2a2a3a;
+  --accent:#f5a623;--accent2:#e8522a;--green:#22c55e;--red:#ef4444;--blue:#3b82f6;--purple:#8b5cf6;
+  --text:#f0f0f5;--muted:#7070a0;--muted2:#50506a;
+  --fh:'Syne',sans-serif;--fb:'DM Sans',sans-serif;
+  --r:16px;--rs:10px;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+body{background:var(--bg);color:var(--text);font-family:var(--fb);min-height:100vh;overflow-x:hidden;}
+@keyframes popIn{from{transform:scale(.3);opacity:0;}to{transform:scale(1);opacity:1;}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
+@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
+@keyframes shake{0%,100%{transform:translateX(0);}20%{transform:translateX(-8px);}40%{transform:translateX(8px);}60%{transform:translateX(-5px);}80%{transform:translateX(5px);}}
+@keyframes slideUp{from{transform:translateY(100%);}to{transform:translateY(0);}}
+.screen{display:none;min-height:100vh;}
+.screen.active{display:block;animation:fadeUp .3s ease both;}
+/* top bar */
+.top-bar{position:sticky;top:0;z-index:50;background:rgba(10,10,15,.94);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:13px 20px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.tb-title{font-family:var(--fh);font-size:15px;font-weight:700;}
+.tb-sub{font-size:11px;color:var(--muted);margin-top:1px;}
+/* tabs */
+.tabs{display:flex;gap:6px;padding:14px 16px 0;overflow-x:auto;scrollbar-width:none;}
+.tabs::-webkit-scrollbar{display:none;}
+.tab{flex-shrink:0;padding:7px 16px;border-radius:30px;border:1.5px solid var(--border);background:transparent;color:var(--muted);font-family:var(--fb);font-size:12px;font-weight:600;cursor:pointer;transition:all .2s;position:relative;}
+.tab.active{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:transparent;color:#fff;}
+.tab-badge{position:absolute;top:-4px;right:-4px;background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:10px;padding:2px 5px;min-width:16px;text-align:center;}
+/* pages */
+.page{display:none;padding:16px;animation:fadeUp .25s ease both;}
+.page.active{display:block;}
+/* cards */
+.card{background:var(--s1);border:1px solid var(--border);border-radius:var(--r);padding:18px;margin-bottom:14px;}
+.card-sm{background:var(--s2);border:1px solid var(--border);border-radius:var(--rs);padding:14px 16px;margin-bottom:10px;}
+.card-title{font-family:var(--fh);font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:12px;}
+/* buttons */
+.btn{display:flex;align-items:center;justify-content:center;gap:7px;width:100%;padding:14px;border-radius:var(--rs);border:none;font-family:var(--fb);font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;}
+.btn:active{transform:scale(.96);}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 4px 18px rgba(245,166,35,.28);}
+.btn-green{background:var(--green);color:#fff;}
+.btn-red{background:var(--red);color:#fff;}
+.btn-secondary{background:var(--s2);border:1.5px solid var(--border);color:var(--text);}
+.btn-ghost{background:transparent;border:1.5px solid var(--border);color:var(--muted);font-size:12px;}
+.btn-sm{width:auto;padding:7px 14px;font-size:12px;border-radius:8px;}
+.btn-xs{width:auto;padding:5px 10px;font-size:11px;border-radius:6px;font-weight:600;border:none;cursor:pointer;font-family:var(--fb);}
+/* form */
+.form-group{margin-bottom:12px;}
+.form-label{font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;display:block;}
+.form-input{width:100%;background:var(--s2);border:1.5px solid var(--border);border-radius:var(--rs);padding:11px 13px;color:var(--text);font-family:var(--fb);font-size:14px;outline:none;transition:border-color .2s;}
+.form-input:focus{border-color:var(--accent);}
+.form-select{appearance:none;cursor:pointer;}
+textarea.form-input{resize:none;}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+/* pin */
+.pin-dots{display:flex;gap:14px;justify-content:center;margin:20px 0 24px;}
+.pin-dot{width:16px;height:16px;border-radius:50%;border:2px solid var(--border);transition:all .18s;}
+.pin-dot.on{background:var(--accent);border-color:var(--accent);transform:scale(1.2);}
+.pin-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:300px;margin:0 auto;}
+.pin-key{background:var(--s2);border:1.5px solid var(--border);border-radius:14px;padding:18px 8px;font-family:var(--fh);font-size:22px;font-weight:700;color:var(--text);cursor:pointer;text-align:center;transition:all .12s;user-select:none;}
+.pin-key:active{background:var(--s3);transform:scale(.9);border-color:var(--accent);}
+.pin-key.del{font-size:16px;color:var(--muted);}
+.pin-key.empty{background:transparent;border-color:transparent;pointer-events:none;}
+.pin-shake{animation:shake .35s ease;}
+/* chips */
+.chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;}
+.chip::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor;}
+.chip-green{background:rgba(34,197,94,.15);color:var(--green);}
+.chip-red{background:rgba(239,68,68,.15);color:var(--red);}
+.chip-blue{background:rgba(59,130,246,.15);color:var(--blue);}
+.chip-grey{background:rgba(112,112,160,.15);color:var(--muted);}
+.chip-yellow{background:rgba(245,166,35,.15);color:var(--accent);}
+.chip-purple{background:rgba(139,92,246,.15);color:var(--purple);}
+.late-tag{font-size:10px;font-weight:700;color:#e8522a;background:rgba(232,82,42,.15);padding:2px 7px;border-radius:8px;}
+.status-pending{color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;font-size:11px;font-weight:700;padding:3px 10px;white-space:nowrap;}
+.status-approved{color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:20px;font-size:11px;font-weight:700;padding:3px 10px;white-space:nowrap;}
+.status-rejected{color:var(--red);background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:20px;font-size:11px;font-weight:700;padding:3px 10px;white-space:nowrap;}
+/* rows */
+.row{display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--border);gap:10px;}
+.row:last-child{border-bottom:none;padding-bottom:0;}
+.row-main{flex:1;min-width:0;}
+.row-title{font-weight:600;font-size:14px;}
+.row-sub{font-size:12px;color:var(--muted);margin-top:2px;}
+.selfie-thumb{width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid var(--accent);cursor:pointer;flex-shrink:0;}
+.selfie-ph{width:40px;height:40px;border-radius:50%;background:var(--s2);border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
+/* stat grid */
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;}
+.stat-box{background:var(--s1);border:1px solid var(--border);border-radius:var(--rs);padding:14px 12px;}
+.stat-num{font-family:var(--fh);font-size:24px;font-weight:800;}
+.stat-lbl{font-size:11px;color:var(--muted);margin-top:2px;}
+/* calendar */
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;}
+.cal-head{font-size:9px;color:var(--muted);text-align:center;padding:4px 0;font-weight:700;}
+.cal-day{aspect-ratio:1;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;position:relative;}
+.cal-day.present{background:rgba(34,197,94,.2);color:var(--green);font-weight:700;}
+.cal-day.absent{background:rgba(239,68,68,.1);color:var(--red);}
+.cal-day.holiday{background:rgba(59,130,246,.15);color:var(--blue);}
+.cal-day.leave{background:rgba(245,166,35,.15);color:var(--accent);}
+.cal-day.halfday{background:rgba(139,92,246,.15);color:var(--purple);}
+.cal-day.late::after{content:'';position:absolute;top:2px;right:2px;width:4px;height:4px;border-radius:50%;background:var(--accent);}
+.cal-day.today{border:1.5px solid var(--accent);}
+.month-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+.month-nav button{background:var(--s2);border:1px solid var(--border);color:var(--text);border-radius:8px;width:32px;height:32px;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.month-nav span{font-family:var(--fh);font-weight:700;font-size:14px;}
+/* selfie */
+#selfie-video{width:100%;max-width:320px;border-radius:var(--r);display:block;margin:0 auto 10px;transform:scaleX(-1);}
+#selfie-canvas{display:none;}
+#selfie-preview{width:100%;max-width:320px;border-radius:var(--r);display:none;margin:0 auto 10px;border:2px solid var(--accent);}
+/* punch */
+.big-clock{font-family:var(--fh);font-size:48px;font-weight:800;text-align:center;line-height:1;letter-spacing:-2px;background:linear-gradient(135deg,var(--text),var(--muted));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.big-date{font-size:13px;color:var(--muted);text-align:center;margin-top:5px;}
+.punch-btn{width:100%;padding:18px;border-radius:var(--r);border:none;font-family:var(--fh);font-size:18px;font-weight:800;cursor:pointer;transition:all .2s;}
+.punch-btn:active{transform:scale(.97);}
+.punch-btn-in{background:linear-gradient(135deg,var(--green),#16a34a);color:#fff;box-shadow:0 8px 32px rgba(34,197,94,.3);}
+.punch-btn-out{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 8px 32px rgba(245,166,35,.3);}
+.punch-btn-done{background:var(--s2);border:1.5px solid var(--border);color:var(--muted);}
+.steps{display:flex;gap:5px;margin-bottom:16px;}
+.step{height:3px;flex:1;border-radius:2px;background:var(--border);}
+.step.done{background:var(--accent);}
+.big-check{width:68px;height:68px;border-radius:50%;background:rgba(34,197,94,.15);border:2px solid var(--green);display:flex;align-items:center;justify-content:center;font-size:28px;margin:0 auto 14px;animation:popIn .5s cubic-bezier(.175,.885,.32,1.275) both;}
+/* payroll */
+.pay-hero{background:linear-gradient(135deg,rgba(245,166,35,.12),rgba(232,82,42,.08));border:1px solid rgba(245,166,35,.2);border-radius:var(--r);padding:22px 18px;margin-bottom:14px;text-align:center;}
+.pay-amount{font-family:var(--fh);font-size:40px;font-weight:800;color:var(--accent);line-height:1;}
+.pay-lbl{font-size:12px;color:var(--muted);margin-top:5px;}
+.pay-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;}
+.pay-row:last-child{border-bottom:none;}
+.pay-row-lbl{color:var(--muted);}
+.pay-row-val{font-weight:700;font-family:var(--fh);}
+.pay-section{font-family:var(--fh);font-size:10px;font-weight:700;color:var(--muted2);text-transform:uppercase;letter-spacing:1.2px;padding:10px 0 4px;border-bottom:1px solid var(--border);margin-bottom:2px;}
+.net-bar{background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:var(--rs);padding:16px 18px;display:flex;align-items:center;justify-content:space-between;margin:14px 0 4px;}
+.net-bar-lbl{font-size:12px;color:rgba(255,255,255,.8);}
+.net-bar-val{font-family:var(--fh);font-size:24px;font-weight:800;color:#fff;}
+/* requests */
+.req-card{background:var(--s2);border:1px solid var(--border);border-radius:var(--rs);padding:14px 16px;margin-bottom:10px;}
+.req-card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;}
+.req-card-title{font-weight:700;font-size:13px;}
+.req-card-meta{font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5;}
+.req-card-actions{display:flex;gap:8px;}
+.req-type-leave{border-left:3px solid var(--purple);}
+.req-type-advance{border-left:3px solid var(--accent);}
+/* sheet */
+.sheet-overlay{position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);display:none;align-items:flex-end;justify-content:center;}
+.sheet-overlay.open{display:flex;animation:fadeIn .2s ease;}
+.sheet{background:var(--s1);border:1px solid var(--border);border-radius:20px 20px 0 0;padding:24px 20px 36px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;animation:slideUp .25s ease;}
+.sheet-handle{width:36px;height:4px;background:var(--border);border-radius:2px;margin:0 auto 20px;}
+.sheet-title{font-family:var(--fh);font-size:18px;font-weight:700;margin-bottom:4px;}
+.sheet-sub{font-size:13px;color:var(--muted);margin-bottom:20px;}
+/* misc */
+.section-title{font-family:var(--fh);font-size:19px;font-weight:700;margin-bottom:3px;}
+.section-sub{color:var(--muted);font-size:13px;margin-bottom:18px;}
+.divider{height:1px;background:var(--border);margin:14px 0;}
+.scroll-list{max-height:340px;overflow-y:auto;}
+.empty-state{text-align:center;padding:32px 16px;color:var(--muted);font-size:13px;}
+.empty-state .emoji{font-size:36px;margin-bottom:10px;}
+.qr-box{background:#fff;border-radius:var(--r);padding:18px;display:flex;align-items:center;justify-content:center;margin:0 auto 14px;width:fit-content;}
+.staff-quick-card{background:var(--s2);border:1px solid var(--border);border-radius:var(--rs);padding:14px 16px;margin-bottom:10px;}
+/* landing */
+.landing-logo{width:72px;height:72px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;display:flex;align-items:center;justify-content:center;font-family:var(--fh);font-size:26px;font-weight:800;color:#fff;box-shadow:0 0 40px rgba(245,166,35,.35);margin:0 auto 20px;animation:popIn .6s cubic-bezier(.175,.885,.32,1.275) both;}
+.feature-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 16px;margin-bottom:28px;}
+.feature-card{background:var(--s1);border:1px solid var(--border);border-radius:var(--rs);padding:14px 12px;}
+.feature-icon{font-size:22px;margin-bottom:6px;}
+.feature-title{font-family:var(--fh);font-size:13px;font-weight:700;margin-bottom:3px;}
+.feature-desc{font-size:11px;color:var(--muted);line-height:1.4;}
+</style>
+
+<!-- ══════════════════════════════════
+     LANDING
+══════════════════════════════════ -->
+<div class="screen" id="screen-landing">
+  <div style="padding:48px 24px 24px;text-align:center;">
+    <div class="landing-logo">AP</div>
+    <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
+    <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 32px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
+  </div>
+  <div class="feature-grid">
+    <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
+    <div class="feature-card"><div class="feature-icon">💰</div><div class="feature-title">Auto Payroll</div><div class="feature-desc">Salary slips with deductions & OT auto-calculated</div></div>
+    <div class="feature-card"><div class="feature-icon">📋</div><div class="feature-title">Leave Mgmt</div><div class="feature-desc">Staff requests, you approve or reject instantly</div></div>
+    <div class="feature-card"><div class="feature-icon">☁️</div><div class="feature-title">Cloud Sync</div><div class="feature-desc">Real-time Firebase sync across all devices</div></div>
+  </div>
+  <div style="padding:0 16px 48px;display:flex;flex-direction:column;gap:10px;">
+    <button class="btn btn-primary" onclick="showScreen('screen-setup')" style="font-size:16px;padding:16px;">🚀 Set Up My Business</button>
+    <button class="btn btn-secondary" onclick="showScreen('screen-login')">I already have an account</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     SETUP
+══════════════════════════════════ -->
+<div class="screen" id="screen-setup">
+  <div class="top-bar">
+    <div><div class="tb-title">AttendPro</div><div class="tb-sub">One-time setup</div></div>
+    <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-landing')">← Back</button>
+  </div>
+  <div style="padding:20px;max-width:440px;margin:0 auto;">
+    <div class="section-title">Setup Your Business</div>
+    <div class="section-sub">Takes 2 minutes. Everything can be changed later.</div>
+    <div class="card">
+      <div class="card-title">Business Info</div>
+      <div class="form-group"><label class="form-label">Business Name</label><input class="form-input" id="setup-biz-name" placeholder="e.g. SR Shoes"></div>
+      <div class="form-group"><label class="form-label">Location / Branch</label><input class="form-input" id="setup-biz-loc" placeholder="e.g. Bhiwandi Store"></div>
+      <div class="form-group"><label class="form-label">Expected Punch-In Time</label><input type="time" class="form-input" id="setup-punch-time" value="10:00"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Owner Account</div>
+      <div class="form-group"><label class="form-label">Username</label><input class="form-input" id="setup-owner-user" placeholder="e.g. rahul" autocapitalize="off"></div>
+      <div class="form-group"><label class="form-label">Password (min 4 chars)</label><input type="password" class="form-input" id="setup-owner-pass" placeholder="••••••••"></div>
+    </div>
+    <button class="btn btn-primary" onclick="completeSetup()" style="font-size:15px;">Create Business →</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     STAFF LOGIN
+══════════════════════════════════ -->
+<div class="screen" id="screen-login">
+  <div class="top-bar">
+    <div><div class="tb-title" id="login-biz-name">AttendPro</div><div class="tb-sub">Staff Login</div></div>
+    <button class="btn btn-ghost btn-sm" onclick="goOwnerLogin()">🔐 Owner</button>
+  </div>
+  <div style="padding:24px 20px;max-width:360px;margin:0 auto;">
+    <div id="login-step-user">
+      <div class="section-title" style="text-align:center;">Who are you?</div>
+      <div class="section-sub" style="text-align:center;">Enter your username</div>
+      <div class="form-group"><input class="form-input" id="login-username" placeholder="Username" style="font-size:18px;text-align:center;font-family:var(--fh);font-weight:700;letter-spacing:1px;" autocapitalize="off" autocorrect="off" onkeydown="if(event.key==='Enter')submitUsername()"></div>
+      <button class="btn btn-primary" onclick="submitUsername()">Continue →</button>
+    </div>
+    <div id="login-step-pin" style="display:none;">
+      <div style="text-align:center;margin-bottom:6px;">
+        <div style="font-size:44px;margin-bottom:10px;">👤</div>
+        <div class="section-title" id="pin-hi">Hi!</div>
+        <div class="section-sub">Enter your 4-digit PIN</div>
+      </div>
+      <div style="max-width:300px;margin:0 auto;">
+        <div class="pin-dots"><div class="pin-dot" id="pd0"></div><div class="pin-dot" id="pd1"></div><div class="pin-dot" id="pd2"></div><div class="pin-dot" id="pd3"></div></div>
+        <div class="pin-grid" id="pin-grid">
+          <button class="pin-key" onclick="pinKey('1')">1</button><button class="pin-key" onclick="pinKey('2')">2</button><button class="pin-key" onclick="pinKey('3')">3</button>
+          <button class="pin-key" onclick="pinKey('4')">4</button><button class="pin-key" onclick="pinKey('5')">5</button><button class="pin-key" onclick="pinKey('6')">6</button>
+          <button class="pin-key" onclick="pinKey('7')">7</button><button class="pin-key" onclick="pinKey('8')">8</button><button class="pin-key" onclick="pinKey('9')">9</button>
+          <button class="pin-key empty"></button><button class="pin-key" onclick="pinKey('0')">0</button><button class="pin-key del" onclick="pinDel()">⌫</button>
+        </div>
+      </div>
+      <button class="btn btn-ghost" style="margin-top:14px;" onclick="backToUser()">← Back</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     STAFF DASHBOARD
+══════════════════════════════════ -->
+<div class="screen" id="screen-staff">
+  <div class="top-bar">
+    <div><div class="tb-title" id="staff-top-name">Staff</div><div class="tb-sub" id="staff-top-biz">AttendPro</div></div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button class="btn btn-ghost btn-sm" onclick="staffLogout()">Logout</button>
+    </div>
+  </div>
+  <div class="tabs" id="staff-tabs">
+    <button class="tab active" onclick="showStaffTab('home',this)">Home</button>
+    <button class="tab" onclick="showStaffTab('requests',this)" id="staff-req-tab">Requests</button>
+    <button class="tab" onclick="showStaffTab('history',this)">History</button>
+  </div>
+  <!-- HOME -->
+  <div class="page active" id="staff-home">
+    <div style="text-align:center;padding:20px 0 14px;">
+      <div class="big-clock" id="staff-clock">--:--</div>
+      <div class="big-date" id="staff-date"></div>
+    </div>
+    <div class="card" id="staff-status-card">
+      <div class="card-title">Today's Status</div>
+      <div id="staff-status-content"></div>
+    </div>
+    <button class="punch-btn punch-btn-in" id="staff-punch-btn" onclick="startPunchFlow()">↓ Punch In</button>
+    <!-- QR step -->
+    <div id="punch-qr-wrap" style="display:none;margin-top:16px;">
+      <div class="steps"><div class="step done"></div><div class="step"></div></div>
+      <div class="section-title">Scan Store QR</div>
+      <div class="section-sub">Scan the QR code at the counter</div>
+      <div style="background:var(--s2);border:2px dashed var(--border);border-radius:var(--r);padding:16px;text-align:center;margin-bottom:12px;">
+        <div id="qr-scanner-div"></div>
+        <p style="color:var(--muted);font-size:12px;margin-top:10px;">Point camera at QR code</p>
+      </div>
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:10px;" onclick="skipQR()">⚡ Skip QR (Demo)</button>
+      <button class="btn btn-secondary" onclick="cancelPunchFlow()">Cancel</button>
+    </div>
+    <!-- Selfie step -->
+    <div id="punch-selfie-wrap" style="display:none;margin-top:16px;">
+      <div class="steps"><div class="step done"></div><div class="step done"></div></div>
+      <div class="section-title">Take a Selfie</div>
+      <div class="section-sub">Your attendance proof photo</div>
+      <video id="selfie-video" autoplay playsinline></video>
+      <canvas id="selfie-canvas"></canvas>
+      <img id="selfie-preview" alt="selfie">
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-secondary" id="retake-btn" style="display:none;" onclick="retakeSelfie()">↺ Retake</button>
+        <button class="btn btn-primary" id="capture-btn" onclick="captureSelfie()">📷 Capture</button>
+        <button class="btn btn-green" id="confirm-btn" style="display:none;" onclick="confirmPunch()">✓ Confirm</button>
+      </div>
+      <button class="btn btn-secondary" style="margin-top:10px;" onclick="cancelPunchFlow()">Cancel</button>
+    </div>
+    <!-- Success -->
+    <div id="punch-success-wrap" style="display:none;margin-top:16px;">
+      <div style="text-align:center;padding:28px 16px;">
+        <div class="big-check">✓</div>
+        <div class="section-title" id="success-title">Punched In!</div>
+        <p style="color:var(--muted);font-size:13px;margin-bottom:20px;" id="success-sub"></p>
+        <button class="btn btn-secondary" onclick="afterPunchDone()">Back to Home</button>
+      </div>
+    </div>
+  </div>
+  <!-- REQUESTS (staff) -->
+  <div class="page" id="staff-requests">
+    <div style="display:flex;gap:10px;margin-bottom:16px;">
+      <button class="btn btn-ghost" onclick="openLeaveRequest()" style="flex:1;border-color:var(--purple);color:var(--purple);">📋 Request Leave</button>
+      <button class="btn btn-ghost" onclick="openAdvanceRequest()" style="flex:1;border-color:var(--accent);color:var(--accent);">💵 Request Advance</button>
+    </div>
+    <div id="staff-req-list"><div class="empty-state"><div class="emoji">📭</div>No requests yet</div></div>
+  </div>
+  <!-- HISTORY -->
+  <div class="page" id="staff-history">
+    <div class="stat-grid" id="my-stats"></div>
+    <div class="card">
+      <div class="month-nav"><button onclick="changeMyMonth(-1)">‹</button><span id="my-month-lbl"></span><button onclick="changeMyMonth(1)">›</button></div>
+      <div class="cal-grid" id="my-cal"></div>
+    </div>
+    <div class="card"><div class="card-title">Recent Punches</div><div class="scroll-list" id="my-log"></div></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     OWNER PANEL
+══════════════════════════════════ -->
+<div class="screen" id="screen-owner">
+  <!-- Owner Login -->
+  <div id="owner-login-wrap" style="padding:28px 20px;max-width:360px;margin:0 auto;">
+    <div style="font-size:48px;text-align:center;margin-bottom:12px;">🔐</div>
+    <div class="section-title" style="text-align:center;">Owner Login</div>
+    <div class="section-sub" style="text-align:center;margin-bottom:22px;">Enter your credentials</div>
+    <div class="form-group"><label class="form-label">Username</label><input class="form-input" id="owner-user-inp" autocapitalize="off"></div>
+    <div class="form-group"><label class="form-label">Password</label><input type="password" class="form-input" id="owner-pass-inp" onkeydown="if(event.key==='Enter')ownerLogin()"></div>
+    <button class="btn btn-primary" onclick="ownerLogin()">Login</button>
+    <div style="margin-top:12px;text-align:center;"><button class="btn btn-ghost btn-sm" style="display:inline-flex;" onclick="backToStaffLogin()">← Staff Login</button></div>
+  </div>
+  <!-- Owner Panel -->
+  <div id="owner-panel-wrap" style="display:none;">
+    <div class="top-bar">
+      <div><div class="tb-title" id="owner-biz-title">AttendPro</div><div class="tb-sub">Owner Panel</div></div>
+      <button class="btn btn-ghost btn-sm" onclick="ownerLogout()">Logout</button>
+    </div>
+    <div class="tabs" id="owner-tabs">
+      <button class="tab active" onclick="showOwnerTab('today',this)">Today</button>
+      <button class="tab" onclick="showOwnerTab('inbox',this)" id="owner-inbox-tab">Inbox</button>
+      <button class="tab" onclick="showOwnerTab('reports',this)">Reports</button>
+      <button class="tab" onclick="showOwnerTab('payroll',this)">💰 Payroll</button>
+      <button class="tab" onclick="showOwnerTab('staff',this)">Staff</button>
+      <button class="tab" onclick="showOwnerTab('settings',this)">Settings</button>
+      <button class="tab" onclick="showOwnerTab('qr',this)">QR</button>
+    </div>
+    <!-- TODAY -->
+    <div class="page active" id="owner-today">
+      <div id="owner-today-content"></div>
+      <div style="display:flex;gap:10px;margin-top:4px;">
+        <button class="btn btn-ghost" onclick="openQuickAdvance()" style="flex:1;border-color:var(--accent);color:var(--accent);font-size:12px;">💵 Give Advance</button>
+        <button class="btn btn-ghost" onclick="showOwnerTab('inbox',document.getElementById('owner-inbox-tab'))" style="flex:1;font-size:12px;" id="quick-inbox-btn">📬 Inbox</button>
+      </div>
+    </div>
+    <!-- INBOX -->
+    <div class="page" id="owner-inbox">
+      <div id="inbox-content"><div class="empty-state"><div class="emoji">📭</div>No pending requests</div></div>
+    </div>
+    <!-- REPORTS -->
+    <div class="page" id="owner-reports">
+      <div class="card">
+        <div class="card-title">Filter</div>
+        <div class="form-group" style="margin-bottom:0;"><label class="form-label">Staff</label>
+          <select class="form-input form-select" id="report-staff" onchange="renderReport()"><option value="all">All Staff</option></select></div>
+      </div>
+      <div class="card">
+        <div class="month-nav"><button onclick="changeReportMonth(-1)">‹</button><span id="report-month-lbl"></span><button onclick="changeReportMonth(1)">›</button></div>
+        <div class="cal-grid" id="report-cal"></div>
+      </div>
+      <div class="stat-grid" id="report-stats"></div>
+      <div class="card">
+        <div class="card-title">Legend</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <span class="chip chip-green">Present</span><span class="chip chip-red">Absent</span>
+          <span class="chip chip-blue">Holiday</span><span class="chip chip-yellow">Leave</span><span class="chip chip-purple">Half Day</span>
+        </div>
+        <p style="font-size:11px;color:var(--muted);margin-top:8px;">Orange dot on day = late arrival</p>
+      </div>
+      <div class="card"><div class="card-title">Log</div><div class="scroll-list" id="report-log"></div></div>
+    </div>
+    <!-- PAYROLL -->
+    <div class="page" id="owner-payroll">
+      <div class="card">
+        <div class="card-title">Payroll Calculator</div>
+        <div class="two-col">
+          <div class="form-group" style="margin-bottom:0;"><label class="form-label">Staff</label>
+            <select class="form-input form-select" id="pay-staff-sel" onchange="renderPayroll()"><option value="">Select…</option></select></div>
+          <div class="form-group" style="margin-bottom:0;"><label class="form-label">Month</label>
+            <input type="month" class="form-input" id="pay-month" onchange="renderPayroll()"></div>
+        </div>
+      </div>
+      <div id="payroll-output" style="display:none;">
+        <div class="pay-hero">
+          <div class="pay-amount" id="pay-net-amount">₹0</div>
+          <div class="pay-lbl">Net Payable · <span id="pay-hero-month"></span></div>
+          <div style="margin-top:10px;" id="pay-status-badge"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Breakdown</div>
+          <div class="pay-section">Earnings</div>
+          <div class="pay-row"><span class="pay-row-lbl">Base Salary</span><span class="pay-row-val" style="color:var(--green);" id="pb-base">₹0</span></div>
+          <div class="pay-row"><span class="pay-row-lbl" id="pb-ot-lbl">Overtime (0 hrs)</span><span class="pay-row-val" style="color:var(--green);" id="pb-ot">+₹0</span></div>
+          <div class="pay-row"><span class="pay-row-lbl">Sales Incentive</span><span class="pay-row-val" style="color:var(--green);" id="pb-incentive">+₹0</span></div>
+          <div class="pay-section">Deductions</div>
+          <div class="pay-row"><span class="pay-row-lbl" id="pb-absent-lbl">Absent (0 days)</span><span class="pay-row-val" style="color:var(--red);" id="pb-absent">−₹0</span></div>
+          <div class="pay-row"><span class="pay-row-lbl" id="pb-late-lbl">Late (0 days)</span><span class="pay-row-val" style="color:var(--red);" id="pb-late">−₹0</span></div>
+          <div class="pay-row"><span class="pay-row-lbl">Advance Recovered</span><span class="pay-row-val" style="color:var(--red);" id="pb-advance">−₹0</span></div>
+          <div class="net-bar"><div class="net-bar-lbl">Net Payable</div><div class="net-bar-val" id="pb-net">₹0</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Adjustments</div>
+          <div class="form-group"><label class="form-label">Sales Incentive (₹)</label><input type="number" class="form-input" id="pay-incentive-inp" placeholder="0" min="0" oninput="renderPayroll()"></div>
+          <div class="form-group"><label class="form-label">Advance to Recover This Month (₹)</label><input type="number" class="form-input" id="pay-advance-recover" placeholder="0" min="0" oninput="renderPayroll()"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Attendance This Month</div>
+          <div class="stat-grid" id="pay-att-stats"></div>
+          <div id="pay-ot-detail" style="font-size:12px;color:var(--muted);margin-top:6px;"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Mark Payment</div>
+          <div class="form-group"><label class="form-label">Payment Mode</label>
+            <select class="form-input form-select" id="pay-mode"><option value="cash">💵 Cash</option><option value="bank">🏦 Bank Transfer</option></select></div>
+          <div class="form-group"><label class="form-label">Note (optional)</label><input class="form-input" id="pay-note" placeholder="e.g. GPay, UPI ref 1234"></div>
+          <div style="display:flex;gap:10px;">
+            <button class="btn btn-primary" onclick="markAsPaid()">✓ Mark as Paid</button>
+            <button class="btn btn-secondary" onclick="printSalarySlip()" style="width:auto;padding:14px 18px;">🖨️ Slip</button>
+          </div>
+        </div>
+      </div>
+      <!-- Advance tracker -->
+      <div class="card">
+        <div class="card-title">Advance Tracker</div>
+        <div class="form-group"><label class="form-label">Staff</label><select class="form-input form-select" id="adv-staff-sel"></select></div>
+        <div class="two-col">
+          <div class="form-group"><label class="form-label">Amount (₹)</label><input type="number" class="form-input" id="adv-amount" placeholder="0" min="0"></div>
+          <div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="adv-date"></div>
+        </div>
+        <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="adv-note" placeholder="e.g. Festival advance"></div>
+        <button class="btn btn-primary" onclick="giveAdvance()">+ Give Advance</button>
+        <div style="margin-top:14px;" id="adv-list"></div>
+      </div>
+      <div class="card"><div class="card-title">Payment History</div><div class="scroll-list" id="pay-history-list"><p style="color:var(--muted);font-size:13px;">No payments yet</p></div></div>
+    </div>
+    <!-- STAFF -->
+    <div class="page" id="owner-staff">
+      <div class="card">
+        <div class="card-title">Add New Staff</div>
+        <div class="form-group"><label class="form-label">Full Name</label><input class="form-input" id="ns-name" placeholder="e.g. Ramesh Kumar"></div>
+        <div class="two-col">
+          <div class="form-group"><label class="form-label">Username</label><input class="form-input" id="ns-user" placeholder="ramesh" autocapitalize="off"></div>
+          <div class="form-group"><label class="form-label">4-Digit PIN</label><input class="form-input" id="ns-pin" type="tel" placeholder="1234" maxlength="4"></div>
+        </div>
+        <button class="btn btn-primary" onclick="addStaff()">+ Add Staff</button>
+      </div>
+      <div class="card"><div class="card-title">Staff Members</div><div id="staff-list-display"></div></div>
+    </div>
+    <!-- SETTINGS -->
+    <div class="page" id="owner-settings">
+      <div class="card">
+        <div class="card-title">Business Settings</div>
+        <div class="form-group"><label class="form-label">Business Name</label><input class="form-input" id="set-biz-name"></div>
+        <div class="form-group"><label class="form-label">Location</label><input class="form-input" id="set-biz-loc"></div>
+        <div class="form-group"><label class="form-label">Default Punch-In Time</label><input type="time" class="form-input" id="set-punch-time"></div>
+        <button class="btn btn-primary btn-sm" onclick="saveBizSettings()">Save Settings</button>
+      </div>
+      <div class="card">
+        <div class="card-title">Change Owner Password</div>
+        <div class="form-group"><label class="form-label">New Password</label><input type="password" class="form-input" id="set-owner-pass"></div>
+        <button class="btn btn-secondary btn-sm" onclick="changeOwnerPass()">Update Password</button>
+      </div>
+      <div class="card">
+        <div class="card-title">Mark Holiday / Leave</div>
+        <div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="mark-date"></div>
+        <div class="form-group"><label class="form-label">Type</label>
+          <select class="form-input form-select" id="mark-type" onchange="toggleMarkStaff()">
+            <option value="holiday">🏖️ Public Holiday (all staff)</option>
+            <option value="leave">🤒 Leave (specific staff)</option>
+          </select></div>
+        <div class="form-group" id="mark-staff-grp" style="display:none;"><label class="form-label">Staff</label><select class="form-input form-select" id="mark-staff-sel"></select></div>
+        <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="mark-note" placeholder="e.g. Diwali, Sick leave"></div>
+        <button class="btn btn-primary" onclick="markDay()">Mark Day</button>
+      </div>
+      <div class="card">
+        <div class="card-title">Manual Attendance Entry</div>
+        <div class="form-group"><label class="form-label">Staff</label><select class="form-input form-select" id="manual-staff"></select></div>
+        <div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="manual-date"></div>
+        <div class="two-col">
+          <div class="form-group"><label class="form-label">Punch In</label><input type="time" class="form-input" id="manual-in"></div>
+          <div class="form-group"><label class="form-label">Punch Out</label><input type="time" class="form-input" id="manual-out"></div>
+        </div>
+        <button class="btn btn-primary" onclick="manualEntry()">Save Entry</button>
+      </div>
+    </div>
+    <!-- QR -->
+    <div class="page" id="owner-qr">
+      <div class="card" style="text-align:center;">
+        <div class="card-title">Store QR Code</div>
+        <p style="color:var(--muted);font-size:13px;margin-bottom:18px;">Print & keep at the counter. Staff scan this before punching in/out.</p>
+        <div class="qr-box"><div id="qr-render"></div></div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:14px;" id="qr-label-text"></p>
+        <button class="btn btn-primary" onclick="printQR()">🖨️ Print QR Code</button>
+      </div>
+    </div>
+  </div><!-- /owner-panel-wrap -->
+</div><!-- /screen-owner -->
+
+<!-- ══ SHEET: Leave Request (staff) ══ -->
+<div class="sheet-overlay" id="sheet-leave-req">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Request Leave</div>
+    <div class="sheet-sub">Your manager will review and approve or reject.</div>
+    <div class="form-group"><label class="form-label">Leave Type</label>
+      <select class="form-input form-select" id="lr-type" onchange="toggleLeaveHours()">
+        <option value="full">Full Day</option><option value="half">Half Day</option><option value="custom">Custom Hours</option>
+      </select></div>
+    <div class="two-col">
+      <div class="form-group"><label class="form-label">From Date</label><input type="date" class="form-input" id="lr-from"></div>
+      <div class="form-group"><label class="form-label">To Date</label><input type="date" class="form-input" id="lr-to"></div>
+    </div>
+    <div id="lr-hours-grp" style="display:none;">
+      <div class="two-col">
+        <div class="form-group"><label class="form-label">From Time</label><input type="time" class="form-input" id="lr-time-from"></div>
+        <div class="form-group"><label class="form-label">To Time</label><input type="time" class="form-input" id="lr-time-to"></div>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Reason</label><textarea class="form-input" id="lr-reason" placeholder="Brief reason for your leave request…" rows="3"></textarea></div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="submitLeaveRequest()">Submit Request</button>
+      <button class="btn btn-secondary" onclick="closeSheet('sheet-leave-req')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SHEET: Advance Request (staff) ══ -->
+<div class="sheet-overlay" id="sheet-advance-req">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Request Advance</div>
+    <div class="sheet-sub">Manager approval required. Approved amount will be deducted from your salary.</div>
+    <div class="form-group"><label class="form-label">Amount Requested (₹)</label><input type="number" class="form-input" id="ar-amount" placeholder="e.g. 2000" min="1"></div>
+    <div class="form-group"><label class="form-label">Reason <span style="color:var(--red);">*</span></label><textarea class="form-input" id="ar-reason" placeholder="Why do you need this advance? Be specific." rows="3"></textarea></div>
+    <div class="card-sm" style="margin-bottom:14px;border-color:rgba(245,166,35,.25);">
+      <p style="font-size:12px;color:var(--muted);">⚠️ Advances are subject to manager approval only. Approved amounts are deducted from your next salary automatically. Frequent requests may be declined.</p>
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="submitAdvanceRequest()">Submit Request</button>
+      <button class="btn btn-secondary" onclick="closeSheet('sheet-advance-req')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SHEET: Quick Give Advance (owner Today page) ══ -->
+<div class="sheet-overlay" id="sheet-quick-advance">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Give Advance</div>
+    <div class="sheet-sub">Record a direct advance payment to staff</div>
+    <div class="form-group"><label class="form-label">Staff</label><select class="form-input form-select" id="qa-staff"></select></div>
+    <div class="two-col">
+      <div class="form-group"><label class="form-label">Amount (₹)</label><input type="number" class="form-input" id="qa-amount" placeholder="0" min="0"></div>
+      <div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="qa-date"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="qa-note" placeholder="e.g. Festival advance, Emergency"></div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="giveQuickAdvance()">Give Advance</button>
+      <button class="btn btn-secondary" onclick="closeSheet('sheet-quick-advance')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SHEET: Salary Settings ══ -->
+<div class="sheet-overlay" id="sheet-salary">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Salary Settings</div>
+    <div class="sheet-sub" id="salary-sheet-name"></div>
+    <div class="form-group"><label class="form-label">Monthly Base Salary (₹)</label><input type="number" class="form-input" id="ss-base" min="0"></div>
+    <div class="two-col">
+      <div class="form-group"><label class="form-label">Weekly Off Day</label>
+        <select class="form-input form-select" id="ss-weeklyoff">
+          <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
+          <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option>
+        </select></div>
+      <div class="form-group"><label class="form-label">OT Rate (₹/hr)</label><input type="number" class="form-input" id="ss-otrate" min="0"></div>
+    </div>
+    <div class="two-col">
+      <div class="form-group"><label class="form-label">Shift Start</label><input type="time" class="form-input" id="ss-start"></div>
+      <div class="form-group"><label class="form-label">Shift End</label><input type="time" class="form-input" id="ss-end"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Late Deduction Rule</label>
+      <select class="form-input form-select" id="ss-laterule" onchange="toggleLateRule()">
+        <option value="fixed">Fixed amount per late day</option>
+        <option value="halfday">Half-day deduction after X lates</option>
+        <option value="none">Track only (no deduction)</option>
+      </select></div>
+    <div id="ss-late-fixed"><div class="form-group"><label class="form-label">Amount per Late Day (₹)</label><input type="number" class="form-input" id="ss-lateamt" min="0"></div></div>
+    <div id="ss-late-half" style="display:none;"><div class="form-group"><label class="form-label">Half-day after how many lates?</label><input type="number" class="form-input" id="ss-lateafter" min="1" value="3"></div></div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="saveSalarySettings()">Save Settings</button>
+      <button class="btn btn-secondary" onclick="closeSheet('sheet-salary')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- close sheet on overlay tap -->
+<script>
+document.querySelectorAll('.sheet-overlay').forEach(el=>{
+  el.addEventListener('click',e=>{if(e.target===el)el.classList.remove('open');});
+});
+// selfie modal open style
+document.getElementById('selfie-modal').addEventListener('click',e=>{if(e.target===document.getElementById('selfie-modal'))closeSelfieModal();});
+</script>
+
+</body>
+</html>
