@@ -131,34 +131,40 @@ const saveSession = (v)=>ls.set('ap_session',v);
 // ─────────────────────────────────────────────
 async function boot(){
   hideSplash();
-  // Check if business exists in localStorage (fast path)
   BIZ_ID = localStorage.getItem('ap_biz_id');
-  if(!BIZ_ID){ showScreen('screen-landing'); return; }
 
-  setLoading(true,'Loading your business…');
-  try {
-    biz = await fbGet(p.biz());
-    if(!biz){ localStorage.removeItem('ap_biz_id'); showScreen('screen-landing'); setLoading(false); return; }
-    const sett = await fbGet(p.settings());
-    if(sett) settings = sett;
-    staffArr = await fbList(p.staff());
-  } catch(e){
-    // Offline fallback — use cached data
-    biz = ls.get('ap_biz_cache');
-    staffArr = ls.get('ap_staff_cache',[]);
-    settings = ls.get('ap_settings_cache',{punchInTime:'10:00'});
-    if(!biz){ showScreen('screen-landing'); setLoading(false); return; }
-    toast('⚠️ Offline mode — showing cached data');
+  // If we have a cached BIZ_ID, load directly
+  if(BIZ_ID){
+    setLoading(true,'Loading…');
+    try {
+      biz = await fbGet(p.biz());
+      if(!biz){ localStorage.removeItem('ap_biz_id'); setLoading(false); showScreen('screen-landing'); return; }
+      const sett = await fbGet(p.settings());
+      if(sett) settings = sett;
+      staffArr = await fbList(p.staff());
+      ls.set('ap_biz_cache',biz);
+      ls.set('ap_staff_cache',staffArr);
+      ls.set('ap_settings_cache',settings);
+    } catch(e){
+      biz = ls.get('ap_biz_cache');
+      staffArr = ls.get('ap_staff_cache',[]);
+      settings = ls.get('ap_settings_cache',{punchInTime:'10:00'});
+      if(!biz){ showScreen('screen-landing'); setLoading(false); return; }
+      toast('⚠️ Offline mode — cached data');
+    }
+    setLoading(false);
+    const sess = session();
+    if(sess?.staffId){
+      const s = staffArr.find(x=>x.id===sess.staffId&&x.active);
+      if(s){ currentStaff=s; openStaffDashboard(); return; }
+    }
+    document.getElementById('login-biz-name').textContent=biz.name;
+    showScreen('screen-login');
+    return;
   }
-  setLoading(false);
 
-  const sess = session();
-  if(sess?.staffId){
-    const s = staffArr.find(x=>x.id===sess.staffId&&x.active);
-    if(s){ currentStaff=s; openStaffDashboard(); return; }
-  }
-  document.getElementById('login-biz-name').textContent=biz.name;
-  showScreen('screen-login');
+  // No BIZ_ID — new device, show landing
+  showScreen('screen-landing');
 }
 
 function hideSplash(){
@@ -1190,6 +1196,39 @@ window._boot       = boot;
 window._setLoading = setLoading;
 window._toast      = toast;
 
+// Device login — find business by ownerUser+ownerPass, save BIZ_ID, boot
+window.deviceLogin = async function(){
+  const u  = document.getElementById('device-owner-user')?.value.trim().toLowerCase();
+  const pw = document.getElementById('device-owner-pass')?.value;
+  if(!u||!pw) return toast('Enter username and password', true);
+  setLoading(true,'Finding your business…');
+  try {
+    const allBiz = await fbList('businesses');
+    const match  = allBiz.find(b => b.ownerUser===u && b.ownerPass===pw);
+    if(!match){
+      setLoading(false);
+      return toast('Username or password incorrect', true);
+    }
+    BIZ_ID = match.id;
+    localStorage.setItem('ap_biz_id', BIZ_ID);
+    biz      = match;
+    const sett = await fbGet(p.settings());
+    if(sett) settings = sett;
+    staffArr = await fbList(p.staff());
+    ls.set('ap_biz_cache', biz);
+    ls.set('ap_staff_cache', staffArr);
+    ls.set('ap_settings_cache', settings);
+    setLoading(false);
+    toast('✓ Device connected!');
+    // Go straight to login screen
+    document.getElementById('login-biz-name').textContent = biz.name;
+    showScreen('screen-login');
+  } catch(e){
+    setLoading(false);
+    toast('Error: '+e.message, true);
+  }
+};
+
 // ─────────────────────────────────────────────
 //  PWA — SERVICE WORKER + NOTIFICATIONS
 // ─────────────────────────────────────────────
@@ -1419,7 +1458,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.25);border-radius:20px;padding:4px 14px;letter-spacing:.5px;margin-bottom:20px;">v1.2.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.3.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -1429,7 +1468,7 @@ textarea.form-input{resize:none;}
   </div>
   <div style="padding:0 16px 48px;display:flex;flex-direction:column;gap:10px;">
     <button class="btn btn-primary" onclick="showScreen('screen-setup')" style="font-size:16px;padding:16px;">🚀 Set Up My Business</button>
-    <button class="btn btn-secondary" onclick="showJoinBiz()">🔗 Join Existing Business</button>
+    <button class="btn btn-secondary" onclick="showScreen('screen-device-login')">I already have an account</button>
   </div>
 </div>
 
@@ -1456,6 +1495,25 @@ textarea.form-input{resize:none;}
       <div class="form-group"><label class="form-label">Password (min 4 chars)</label><input type="password" class="form-input" id="setup-owner-pass" placeholder="••••••••"></div>
     </div>
     <button class="btn btn-primary" onclick="completeSetup()" style="font-size:15px;">Create Business →</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     DEVICE LOGIN (new device)
+══════════════════════════════════ -->
+<div class="screen" id="screen-device-login">
+  <div class="top-bar">
+    <div><div class="tb-title">AttendPro</div><div class="tb-sub">Connect this device</div></div>
+    <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-landing')">← Back</button>
+  </div>
+  <div style="padding:28px 20px;max-width:360px;margin:0 auto;">
+    <div style="font-size:44px;text-align:center;margin-bottom:14px;">🔐</div>
+    <div class="section-title" style="text-align:center;">Owner Login</div>
+    <div class="section-sub" style="text-align:center;margin-bottom:24px;">Enter your owner credentials to connect this device to your business.</div>
+    <div class="form-group"><label class="form-label">Owner Username</label><input class="form-input" id="device-owner-user" placeholder="e.g. rahul" autocapitalize="off" autocorrect="off"></div>
+    <div class="form-group"><label class="form-label">Password</label><input type="password" class="form-input" id="device-owner-pass" onkeydown="if(event.key==='Enter')deviceLogin()"></div>
+    <button class="btn btn-primary" onclick="deviceLogin()" style="font-size:15px;">Connect Device →</button>
+    <p style="text-align:center;font-size:12px;color:var(--muted);margin-top:14px;">This only needs to be done once per device.</p>
   </div>
 </div>
 
@@ -1944,7 +2002,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.2.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.3.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -1952,17 +2010,31 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
+    <!-- v1.3.0 -->
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.3.0</span>
+        <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Login from any device using owner username &amp; password</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>"I already have an account" flow on landing screen</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Connect button unresponsive (ES module scope bug)</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Firestore rules blocking new device login</span></div>
+      </div>
+    </div>
+    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
     <!-- v1.2.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.2.0</span>
-        <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--text);">v1.2.0</span>
+        <span style="font-size:11px;color:var(--muted);">PWA + Notifications</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
         <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Installable PWA — add to home screen on mobile &amp; desktop</span></div>
         <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Push notifications for punch, leave &amp; advance events</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Profile section with version history (this screen)</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: landing screen buttons were unresponsive (ES module scope)</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Profile section with version history (👤 button)</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: landing screen buttons unresponsive (ES module scope)</span></div>
       </div>
     </div>
     <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
