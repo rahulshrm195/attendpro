@@ -1184,8 +1184,11 @@ function toast(msg,err=false){
 }
 
 // Expose Firebase primitives needed by external scripts
-window._fbGet  = fbGet;
+window._fbGet      = fbGet;
 window._fbSetBizId = (id) => { BIZ_ID = id; localStorage.setItem('ap_biz_id', id); };
+window._boot       = boot;
+window._setLoading = setLoading;
+window._toast      = toast;
 
 // ─────────────────────────────────────────────
 //  PWA — SERVICE WORKER + NOTIFICATIONS
@@ -1912,22 +1915,22 @@ window.showJoinBiz = function(){
 
 window.joinBusiness = async function(){
   const id = document.getElementById('join-biz-id').value.trim();
-  if(!id || !id.startsWith('biz_')) return toast('Enter a valid Business ID (starts with biz_)', true);
-  setLoading(true, 'Connecting…');
+  if(!id || !id.startsWith('biz_')) return window._toast('Enter a valid Business ID (starts with biz_)', true);
+  window._setLoading(true, 'Connecting…');
   try {
     const bizData = await window._fbGet(`businesses/${id}`);
     if(!bizData){
-      setLoading(false);
-      return toast('Business not found. Check the ID and try again.', true);
+      window._setLoading(false);
+      return window._toast('Business not found. Check the ID and try again.', true);
     }
     window._fbSetBizId(id);
-    closeSheet('sheet-join-biz');
-    setLoading(false);
-    toast('✓ Connected! Loading…');
-    setTimeout(()=> boot(), 400);
+    document.getElementById('sheet-join-biz').classList.remove('open');
+    window._setLoading(false);
+    window._toast('✓ Connected! Loading…');
+    setTimeout(()=> window._boot(), 600);
   } catch(e) {
-    setLoading(false);
-    toast('Error: ' + e.message, true);
+    window._setLoading(false);
+    window._toast('Error: ' + e.message, true);
   }
 };
 </script>
