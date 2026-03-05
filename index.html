@@ -6,6 +6,10 @@
 <meta name="theme-color" content="#0a0a0f">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AttendPro">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>AttendPro — Staff Management</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
@@ -373,7 +377,7 @@ window.confirmPunch=async function(){
   document.getElementById('punch-success-wrap').style.display='block';
   document.getElementById('success-title').textContent=punchAction==='in'?'✓ Punched In!':'✓ Punched Out!';
   document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late today':''}`;
-};
+  sendNotif(punchAction==='in'?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}`,'punch');};
 window.afterPunchDone=function(){resetPunchSteps();renderStaffStatus();};
 function stopCamera(){const vid=document.getElementById('selfie-video');if(vid?.srcObject){vid.srcObject.getTracks().forEach(t=>t.stop());vid.srcObject=null;}}
 
@@ -407,6 +411,7 @@ window.submitLeaveRequest=async function(){
     closeSheet('sheet-leave-req');
     renderStaffRequests();updateStaffReqBadge();
     toast('✓ Leave request submitted');
+    sendNotif('Leave Request Sent 📋',`Your request is pending approval`,'leave-req');
   }catch(e){toast('Error: '+e.message,true);}
 };
 
@@ -428,6 +433,7 @@ window.submitAdvanceRequest=async function(){
     closeSheet('sheet-advance-req');
     renderStaffRequests();updateStaffReqBadge();
     toast('✓ Advance request submitted');
+    sendNotif('Advance Request Sent 💵',`₹${amount} request is pending approval`,'adv-req');
   }catch(e){toast('Error: '+e.message,true);}
 };
 
@@ -497,6 +503,7 @@ window.ownerLogin=function(){
     document.getElementById('owner-panel-wrap').style.display='block';
     document.getElementById('owner-biz-title').textContent=biz.name;
     loadOwnerSettings();renderOwnerToday();populateDropdowns();renderQRCode();updateInboxBadge();
+    requestNotifPermission();
   }else{toast('Wrong credentials',true);document.getElementById('owner-pass-inp').value='';}
 };
 window.ownerLogout=function(){
@@ -623,6 +630,7 @@ window.approveReq=async function(id){
       await batch.commit();
     }
     toast('✓ Approved');renderInbox();updateInboxBadge();
+    sendNotif('Request Approved ✓',`${r.type==='leave'?'Leave':'Advance'} request for ${r.staffName} approved`,'req-approved');
   }catch(e){toast('Error: '+e.message,true);}
   setLoading(false);
 };
@@ -1066,8 +1074,8 @@ window.openSelfieModal=function(name,time,src){
   document.getElementById('selfie-modal').classList.add('open');
 };
 window.closeSelfieModal=function(){document.getElementById('selfie-modal').classList.remove('open');};
-function openSheet(id){document.getElementById(id).classList.add('open');}
-function closeSheet(id){document.getElementById(id).classList.remove('open');}
+window.openSheet = function(id){document.getElementById(id).classList.add('open');}
+window.closeSheet = function(id){document.getElementById(id).classList.remove('open');}
 document.querySelectorAll('.sheet-overlay').forEach(el=>{
   el.addEventListener('click',e=>{if(e.target===el)el.classList.remove('open');});
 });
@@ -1136,7 +1144,7 @@ function startClock(){
   };
   tick();clockTick=setInterval(tick,1000);
 }
-function showScreen(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');}
+window.showScreen = function(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');}
 function v(id){return document.getElementById(id)?.value?.trim()||'';}
 function todayStr(){const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;}
 function pad(n){return n<10?'0'+n:''+n;}
@@ -1160,6 +1168,35 @@ function toast(msg,err=false){
   const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';
   t.style.borderColor=err?'var(--red)':'var(--green)';t.style.color=err?'var(--red)':'var(--green)';
   clearTimeout(window._tt);window._tt=setTimeout(()=>t.style.display='none',3000);
+}
+
+// ─────────────────────────────────────────────
+//  PWA — SERVICE WORKER + NOTIFICATIONS
+// ─────────────────────────────────────────────
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>{
+    navigator.serviceWorker.register('sw.js').then(reg=>{
+      console.log('SW registered');
+    }).catch(()=>{});
+  });
+}
+
+function requestNotifPermission(){
+  if(!('Notification' in window)) return;
+  if(Notification.permission==='default'){
+    Notification.requestPermission().then(p=>{
+      if(p==='granted') toast('✓ Notifications enabled');
+    });
+  }
+}
+
+function sendNotif(title, body, tag='ap-notif'){
+  if(!('Notification' in window)||Notification.permission!=='granted') return;
+  try{
+    navigator.serviceWorker.ready.then(reg=>{
+      reg.showNotification(title,{body,icon:'icon-192.png',badge:'icon-192.png',tag,renotify:true,vibrate:[200,100,200]});
+    }).catch(()=>new Notification(title,{body,icon:'icon-192.png',tag}));
+  }catch{try{new Notification(title,{body,tag});}catch{}}
 }
 
 // ─────────────────────────────────────────────
@@ -1443,6 +1480,7 @@ textarea.form-input{resize:none;}
   <div class="top-bar">
     <div><div class="tb-title" id="staff-top-name">Staff</div><div class="tb-sub" id="staff-top-biz">AttendPro</div></div>
     <div style="display:flex;align-items:center;gap:8px;">
+      <button class="btn btn-ghost btn-sm" onclick="openProfile()" style="padding:7px 10px;">👤</button>
       <button class="btn btn-ghost btn-sm" onclick="staffLogout()">Logout</button>
     </div>
   </div>
@@ -1536,7 +1574,10 @@ textarea.form-input{resize:none;}
   <div id="owner-panel-wrap" style="display:none;">
     <div class="top-bar">
       <div><div class="tb-title" id="owner-biz-title">AttendPro</div><div class="tb-sub">Owner Panel</div></div>
-      <button class="btn btn-ghost btn-sm" onclick="ownerLogout()">Logout</button>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="openProfile()" style="padding:7px 10px;">👤</button>
+        <button class="btn btn-ghost btn-sm" onclick="ownerLogout()">Logout</button>
+      </div>
     </div>
     <div class="tabs" id="owner-tabs">
       <button class="tab active" onclick="showOwnerTab('today',this)">Today</button>
@@ -1814,6 +1855,144 @@ document.querySelectorAll('.sheet-overlay').forEach(el=>{
 });
 // selfie modal open style
 document.getElementById('selfie-modal').addEventListener('click',e=>{if(e.target===document.getElementById('selfie-modal'))closeSelfieModal();});
+</script>
+
+<!-- ══ SHEET: Profile + What's New ══ -->
+<div class="sheet-overlay" id="sheet-profile">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;">
+      <div style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-family:var(--fh);font-size:20px;font-weight:800;color:#fff;flex-shrink:0;" id="profile-avatar">?</div>
+      <div><div style="font-family:var(--fh);font-size:17px;font-weight:700;" id="profile-name">—</div><div style="font-size:12px;color:var(--muted);margin-top:2px;" id="profile-role">—</div></div>
+    </div>
+    <div class="card-sm" style="margin-bottom:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.2.0</span>
+      </div>
+    </div>
+    <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
+      <div><div style="font-size:14px;font-weight:600;">🔔 Notifications</div><div style="font-size:11px;color:var(--muted);margin-top:2px;" id="notif-status-text">Tap to enable</div></div>
+      <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
+    </div>
+    <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
+    <!-- v1.2.0 -->
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.2.0</span>
+        <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Installable PWA — add to home screen on mobile &amp; desktop</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Push notifications for punch, leave &amp; advance events</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Profile section with version history (this screen)</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: landing screen buttons were unresponsive (ES module scope)</span></div>
+      </div>
+    </div>
+    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
+    <!-- v1.1.0 -->
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--text);">v1.1.0</span>
+        <span style="font-size:11px;color:var(--muted);">Firebase Cloud Sync</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Firebase Firestore — real-time sync across all devices</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Offline mode with localStorage cache fallback</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Business setup flow with unique business ID</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Loading bar indicator for all async operations</span></div>
+      </div>
+    </div>
+    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
+    <!-- v1.0.0 -->
+    <div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--text);">v1.0.0</span>
+        <span style="font-size:11px;color:var(--muted);">Initial Launch</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Staff login — username + 4-digit PIN with persistent session</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>QR scan + selfie proof attendance with anti-proxy</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Leave requests — full day, half day, custom hours</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Advance requests with owner approve / reject</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Auto payroll — OT, absent &amp; late deductions</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Printable salary slips per staff per month</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Owner inbox with pending badge + quick Give Advance</span></div>
+      </div>
+    </div>
+    <button class="btn btn-secondary" onclick="closeSheet('sheet-profile')">Close</button>
+  </div>
+</div>
+
+<script>
+// Profile sheet handler — runs outside module so it can see window.* functions
+window.openProfile = function(){
+  const isOwner = document.getElementById('owner-panel-wrap')?.style.display !== 'none' &&
+                  document.getElementById('screen-owner')?.classList.contains('active');
+  const avatar  = document.getElementById('profile-avatar');
+  const nameEl  = document.getElementById('profile-name');
+  const roleEl  = document.getElementById('profile-role');
+  if(isOwner){
+    const bizName = document.getElementById('owner-biz-title')?.textContent || 'Owner';
+    avatar.textContent = bizName.charAt(0).toUpperCase();
+    nameEl.textContent = bizName;
+    roleEl.textContent = 'Owner · AttendPro';
+  } else {
+    const staffName = document.getElementById('staff-top-name')?.textContent || 'Staff';
+    avatar.textContent = staffName.charAt(0).toUpperCase();
+    nameEl.textContent = staffName;
+    roleEl.textContent = (document.getElementById('staff-top-biz')?.textContent || '') + ' · Staff';
+  }
+  // Update notification status
+  const statusEl = document.getElementById('notif-status-text');
+  const btnEl    = document.getElementById('notif-toggle-btn');
+  if(!('Notification' in window)){
+    statusEl.textContent = 'Not supported on this browser';
+    btnEl.style.display = 'none';
+  } else if(Notification.permission === 'granted'){
+    statusEl.textContent = 'Enabled ✓';
+    btnEl.textContent = 'Enabled ✓';
+    btnEl.style.opacity = '0.5';
+    btnEl.style.pointerEvents = 'none';
+  } else if(Notification.permission === 'denied'){
+    statusEl.textContent = 'Blocked — enable in browser settings';
+    btnEl.textContent = 'Blocked';
+    btnEl.style.opacity = '0.5';
+  } else {
+    statusEl.textContent = 'Tap to enable push notifications';
+    btnEl.textContent = 'Enable';
+    btnEl.style.opacity = '1';
+    btnEl.style.pointerEvents = 'auto';
+  }
+  document.getElementById('sheet-profile').classList.add('open');
+};
+
+window.toggleNotifications = function(){
+  if(!('Notification' in window)) return;
+  if(Notification.permission === 'granted'){
+    document.getElementById('notif-status-text').textContent = 'Already enabled ✓';
+  } else {
+    Notification.requestPermission().then(p=>{
+      if(p === 'granted'){
+        document.getElementById('notif-status-text').textContent = 'Enabled ✓';
+        document.getElementById('notif-toggle-btn').textContent = 'Enabled ✓';
+        document.getElementById('notif-toggle-btn').style.opacity = '0.5';
+        document.getElementById('notif-toggle-btn').style.pointerEvents = 'none';
+        // Send a test notification
+        setTimeout(()=>{
+          if(typeof sendNotif === 'function')
+            sendNotif('AttendPro 🔔', 'Notifications are now enabled!', 'test');
+        }, 500);
+      } else {
+        document.getElementById('notif-status-text').textContent = 'Permission denied';
+      }
+    });
+  }
+};
+// Re-attach sheet overlay listeners (includes new profile sheet)
+document.querySelectorAll('.sheet-overlay').forEach(el=>{
+  el.addEventListener('click',e=>{if(e.target===el)el.classList.remove('open');});
+});
 </script>
 
 </body>
