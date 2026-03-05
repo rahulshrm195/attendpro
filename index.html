@@ -952,8 +952,21 @@ function loadOwnerSettings(){
   document.getElementById('set-punch-time').value=settings.punchInTime||'10:00';
   document.getElementById('mark-date').value=new Date().toISOString().split('T')[0];
   document.getElementById('manual-date').value=new Date().toISOString().split('T')[0];
+  const bizIdEl=document.getElementById('biz-id-display');
+  if(bizIdEl) bizIdEl.textContent=BIZ_ID||'—';
   populateDropdowns();
 }
+window.copyBizId=function(){
+  if(!BIZ_ID) return;
+  navigator.clipboard.writeText(BIZ_ID).then(()=>toast('✓ Business ID copied!')).catch(()=>{
+    // fallback
+    const el=document.getElementById('biz-id-display');
+    const range=document.createRange();range.selectNode(el);
+    window.getSelection().removeAllRanges();window.getSelection().addRange(range);
+    document.execCommand('copy');window.getSelection().removeAllRanges();
+    toast('✓ Business ID copied!');
+  });
+};
 window.saveBizSettings=async function(){
   biz.name=v('set-biz-name')||biz.name;
   biz.location=v('set-biz-loc');
@@ -1169,6 +1182,10 @@ function toast(msg,err=false){
   t.style.borderColor=err?'var(--red)':'var(--green)';t.style.color=err?'var(--red)':'var(--green)';
   clearTimeout(window._tt);window._tt=setTimeout(()=>t.style.display='none',3000);
 }
+
+// Expose Firebase primitives needed by external scripts
+window._fbGet  = fbGet;
+window._fbSetBizId = (id) => { BIZ_ID = id; localStorage.setItem('ap_biz_id', id); };
 
 // ─────────────────────────────────────────────
 //  PWA — SERVICE WORKER + NOTIFICATIONS
@@ -1398,7 +1415,8 @@ textarea.form-input{resize:none;}
   <div style="padding:48px 24px 24px;text-align:center;">
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
-    <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 32px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
+    <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
+    <span style="display:inline-block;font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.25);border-radius:20px;padding:4px 14px;letter-spacing:.5px;margin-bottom:20px;">v1.2.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -1408,7 +1426,7 @@ textarea.form-input{resize:none;}
   </div>
   <div style="padding:0 16px 48px;display:flex;flex-direction:column;gap:10px;">
     <button class="btn btn-primary" onclick="showScreen('screen-setup')" style="font-size:16px;padding:16px;">🚀 Set Up My Business</button>
-    <button class="btn btn-secondary" onclick="showScreen('screen-login')">I already have an account</button>
+    <button class="btn btn-secondary" onclick="showJoinBiz()">🔗 Join Existing Business</button>
   </div>
 </div>
 
@@ -1707,6 +1725,13 @@ textarea.form-input{resize:none;}
         <div class="form-group"><label class="form-label">Location</label><input class="form-input" id="set-biz-loc"></div>
         <div class="form-group"><label class="form-label">Default Punch-In Time</label><input type="time" class="form-input" id="set-punch-time"></div>
         <button class="btn btn-primary btn-sm" onclick="saveBizSettings()">Save Settings</button>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+        <div class="form-label">Business ID <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;">(share with staff to connect new devices)</span></div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <div id="biz-id-display" style="flex:1;background:var(--s2);border:1.5px solid var(--border);border-radius:var(--rs);padding:11px 13px;font-size:12px;font-family:monospace;color:var(--muted);word-break:break-all;"></div>
+          <button class="btn btn-ghost btn-sm" onclick="copyBizId()" style="flex-shrink:0;">Copy</button>
+        </div>
+      </div>
       </div>
       <div class="card">
         <div class="card-title">Change Owner Password</div>
@@ -1857,7 +1882,55 @@ document.querySelectorAll('.sheet-overlay').forEach(el=>{
 document.getElementById('selfie-modal').addEventListener('click',e=>{if(e.target===document.getElementById('selfie-modal'))closeSelfieModal();});
 </script>
 
-<!-- ══ SHEET: Profile + What's New ══ -->
+<!-- ══ SHEET: Join Existing Business ══ -->
+<div class="sheet-overlay" id="sheet-join-biz">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Join Existing Business</div>
+    <div class="sheet-sub">Enter the Business ID from your owner's Settings page. You only need to do this once on each new device.</div>
+    <div class="form-group">
+      <label class="form-label">Business ID</label>
+      <input class="form-input" id="join-biz-id" placeholder="biz_xxxxxxxxxxxxxxx"
+        style="font-size:13px;letter-spacing:.5px;font-family:monospace;"
+        autocapitalize="off" autocorrect="off" spellcheck="false">
+    </div>
+    <div class="card-sm" style="margin-bottom:16px;border-color:rgba(59,130,246,.2);">
+      <p style="font-size:12px;color:var(--muted);">💡 Ask your owner to go to <strong style="color:var(--text);">Owner Panel → Settings → Business ID</strong> and share the code with you.</p>
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="joinBusiness()">Connect →</button>
+      <button class="btn btn-secondary" onclick="closeSheet('sheet-join-biz')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+window.showJoinBiz = function(){
+  document.getElementById('join-biz-id').value = '';
+  document.getElementById('sheet-join-biz').classList.add('open');
+};
+
+window.joinBusiness = async function(){
+  const id = document.getElementById('join-biz-id').value.trim();
+  if(!id || !id.startsWith('biz_')) return toast('Enter a valid Business ID (starts with biz_)', true);
+  setLoading(true, 'Connecting…');
+  try {
+    const bizData = await window._fbGet(`businesses/${id}`);
+    if(!bizData){
+      setLoading(false);
+      return toast('Business not found. Check the ID and try again.', true);
+    }
+    window._fbSetBizId(id);
+    closeSheet('sheet-join-biz');
+    setLoading(false);
+    toast('✓ Connected! Loading…');
+    setTimeout(()=> boot(), 400);
+  } catch(e) {
+    setLoading(false);
+    toast('Error: ' + e.message, true);
+  }
+};
+</script>
 <div class="sheet-overlay" id="sheet-profile">
   <div class="sheet">
     <div class="sheet-handle"></div>
