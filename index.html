@@ -122,7 +122,7 @@ let punchAction='in', capturedSelfie=null, qrScanner=null;
 let clockTick=null, reportMonthOff=0, myMonthOff=0;
 let editingSalaryStaffId=null;
 let unsubListeners = [];
-const STORE_QR = 'ATTENDPRO_STORE_QR_2024';
+const STORE_QR = 'ATTENDPRO_STORE_QR_V1';
 const session = ()=>ls.get('ap_session',null);
 const saveSession = (v)=>ls.set('ap_session',v);
 
@@ -369,11 +369,41 @@ window.confirmPunch=async function(){
   let rec=null;
   try{rec=await fbGet(key);}catch{}
   if(!rec) rec={staffId:currentStaff.id,staffName:currentStaff.name,date:today};
-  if(punchAction==='in'){rec.inTime=ts;rec.inSelfie=capturedSelfie;rec.late=isLate(now,currentStaff);}
-  else{rec.outTime=ts;rec.outSelfie=capturedSelfie;}
+
+  // ── GPS check ──
+  let gpsData={};
+  try{
+    const pos = await new Promise((resolve,reject)=>
+      navigator.geolocation.getCurrentPosition(resolve,reject,{timeout:6000,maximumAge:30000})
+    );
+    const lat=pos.coords.latitude, lng=pos.coords.longitude, acc=Math.round(pos.coords.accuracy);
+    gpsData={lat,lng,accuracy:acc};
+    // Compare to store location if set
+    const storeLat=settings.storeLat, storeLng=settings.storeLng, radius=settings.storeRadius||300;
+    if(storeLat&&storeLng){
+      const dist=Math.round(haversineM(lat,lng,storeLat,storeLng));
+      gpsData.dist=dist;
+      gpsData.flagged=dist>(radius+acc); // outside allowed radius + accuracy buffer
+    }
+  }catch(e){
+    gpsData={error:'GPS unavailable'};
+  }
+
+  if(punchAction==='in'){
+    rec.inTime=ts;rec.inSelfie=capturedSelfie;rec.late=isLate(now,currentStaff);
+    rec.inGps=gpsData;
+    if(gpsData.flagged) rec.gpsFlag=true;
+    if(gpsData.dist!=null) rec.inDist=gpsData.dist;
+  } else {
+    rec.outTime=ts;rec.outSelfie=capturedSelfie;
+    rec.outGps=gpsData;
+    if(gpsData.flagged&&!rec.gpsFlag) rec.gpsFlag=true;
+    if(gpsData.dist!=null) rec.outDist=gpsData.dist;
+  }
+
   try{
     await fbSet(key,rec);
-    ls.set('ap_rec_cache_'+currentStaff.id+'_'+today,rec); // local cache
+    ls.set('ap_rec_cache_'+currentStaff.id+'_'+today,rec);
   }catch{
     ls.set('ap_rec_cache_'+currentStaff.id+'_'+today,rec);
     toast('⚠️ Saved locally — will sync when online');
@@ -382,8 +412,19 @@ window.confirmPunch=async function(){
   document.getElementById('punch-selfie-wrap').style.display='none';
   document.getElementById('punch-success-wrap').style.display='block';
   document.getElementById('success-title').textContent=punchAction==='in'?'✓ Punched In!':'✓ Punched Out!';
-  document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late today':''}`;
-  sendNotif(punchAction==='in'?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}`,'punch');};
+  const distTxt=gpsData.dist!=null?` · ${gpsData.dist}m from store`:'';
+  const flagTxt=gpsData.flagged?' · ⚠️ Location flag':'';
+  document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late':''}${distTxt}${flagTxt}`;
+  sendNotif(punchAction==='in'?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}${gpsData.flagged?' · ⚠️ Location flagged':''}`,'punch');
+};
+
+// Haversine distance in meters
+function haversineM(lat1,lng1,lat2,lng2){
+  const R=6371000,r=Math.PI/180;
+  const dLat=(lat2-lat1)*r,dLng=(lng2-lng1)*r;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*r)*Math.cos(lat2*r)*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
 window.afterPunchDone=function(){resetPunchSteps();renderStaffStatus();};
 function stopCamera(){const vid=document.getElementById('selfie-video');if(vid?.srcObject){vid.srcObject.getTracks().forEach(t=>t.stop());vid.srcObject=null;}}
 
@@ -557,7 +598,7 @@ async function renderOwnerToday(){
       let status=`<span class="chip chip-red">Not In</span>`;
       if(rec?.inTime&&rec?.outTime)status=`<span class="chip chip-blue">Done</span>`;
       else if(rec?.inTime)status=`<span class="chip chip-green">In</span>`;
-      html+=`<div class="row"><div class="row-main"><div class="row-title">${s.name}${rec?.late?' <span class="late-tag">LATE</span>':''}</div><div class="row-sub">In: ${rec?.inTime||'—'} · Out: ${rec?.outTime||'—'}</div></div>${status}
+      html+=`<div class="row"><div class="row-main"><div class="row-title">${s.name}${rec?.late?' <span class="late-tag">LATE</span>':''}${rec?.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':''}</div><div class="row-sub">In: ${rec?.inTime||'—'} · Out: ${rec?.outTime||'—'}${rec?.inDist!=null?' · '+rec.inDist+'m from store':''}</div></div>${status}
       ${rec?.inSelfie?`<img class="selfie-thumb" src="${rec.inSelfie}" onclick="openSelfieModal('${s.name}','${rec.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`;
     });
     const late=active.filter(s=>recs[s.id+'_'+today]?.late).map(s=>s.name);
@@ -678,8 +719,8 @@ window.renderReport=async function(){
     else document.getElementById('report-stats').innerHTML='';
     const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,30);
     document.getElementById('report-log').innerHTML=list.length?list.map(r=>`
-      <div class="row"><div class="row-main"><div class="row-title">${r.staffName}${r.late?' <span class="late-tag">LATE</span>':''}${r.manual?' <span style="font-size:10px;color:var(--muted)">(manual)</span>':''}</div>
-      <div class="row-sub">${r.date} · In: ${r.inTime||'—'} · Out: ${r.outTime||'—'}</div></div>
+      <div class="row"><div class="row-main"><div class="row-title">${r.staffName}${r.late?' <span class="late-tag">LATE</span>':''}${r.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':''}${r.manual?' <span style="font-size:10px;color:var(--muted)">(manual)</span>':''}</div>
+      <div class="row-sub">${r.date} · In: ${r.inTime||'—'} · Out: ${r.outTime||'—'}${r.inDist!=null?' · '+r.inDist+'m':''}</div></div>
       ${r.inSelfie?`<img class="selfie-thumb" src="${r.inSelfie}" onclick="openSelfieModal('${r.staffName}','${r.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`).join('')
       :'<div class="empty-state"><div class="emoji">📅</div>No records</div>';
   }catch(e){document.getElementById('report-log').innerHTML='<div class="empty-state">Error: '+e.message+'</div>';}
@@ -960,8 +1001,36 @@ function loadOwnerSettings(){
   document.getElementById('manual-date').value=new Date().toISOString().split('T')[0];
   const bizIdEl=document.getElementById('biz-id-display');
   if(bizIdEl) bizIdEl.textContent=BIZ_ID||'—';
+  // Load store GPS settings
+  if(settings.storeLat) document.getElementById('set-store-lat').value=settings.storeLat;
+  if(settings.storeLng) document.getElementById('set-store-lng').value=settings.storeLng;
+  if(settings.storeRadius) document.getElementById('set-store-radius').value=settings.storeRadius;
+  const locStatus=document.getElementById('store-loc-status');
+  if(locStatus) locStatus.textContent=settings.storeLat?`✓ Store location set (${settings.storeLat}, ${settings.storeLng}) · ${settings.storeRadius||300}m radius`:'⚠️ No store location set — GPS flagging disabled';
   populateDropdowns();
 }
+window.saveStoreLocation=async function(){
+  const lat=parseFloat(document.getElementById('set-store-lat').value);
+  const lng=parseFloat(document.getElementById('set-store-lng').value);
+  const radius=parseInt(document.getElementById('set-store-radius').value)||300;
+  if(isNaN(lat)||isNaN(lng)) return toast('Enter valid coordinates',true);
+  settings.storeLat=lat;settings.storeLng=lng;settings.storeRadius=radius;
+  try{
+    await fbSet(p.settings(),settings);
+    ls.set('ap_settings_cache',settings);
+    document.getElementById('store-loc-status').textContent=`✓ Saved · (${lat}, ${lng}) · ${radius}m radius`;
+    toast('✓ Store location saved');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+window.detectStoreLocation=function(){
+  if(!navigator.geolocation) return toast('GPS not available on this device',true);
+  toast('Detecting location…');
+  navigator.geolocation.getCurrentPosition(pos=>{
+    document.getElementById('set-store-lat').value=pos.coords.latitude.toFixed(6);
+    document.getElementById('set-store-lng').value=pos.coords.longitude.toFixed(6);
+    toast('✓ Location detected — click Save Location');
+  },()=>toast('Could not get location',true),{timeout:8000});
+};
 window.copyBizId=function(){
   if(!BIZ_ID) return;
   navigator.clipboard.writeText(BIZ_ID).then(()=>toast('✓ Business ID copied!')).catch(()=>{
@@ -1301,7 +1370,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);min-height:100
 @keyframes fadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
 @keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
 @keyframes shake{0%,100%{transform:translateX(0);}20%{transform:translateX(-8px);}40%{transform:translateX(8px);}60%{transform:translateX(-5px);}80%{transform:translateX(5px);}}
-@keyframes slideUp{from{transform:translateY(100%);}to{transform:translateY(0);}}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}@keyframes slideUp{from{transform:translateY(100%);}to{transform:translateY(0);}}
 .screen{display:none;min-height:100vh;}
 .screen.active{display:block;animation:fadeUp .3s ease both;}
 /* top bar */
@@ -1359,6 +1428,7 @@ textarea.form-input{resize:none;}
 .chip-yellow{background:rgba(245,166,35,.15);color:var(--accent);}
 .chip-purple{background:rgba(139,92,246,.15);color:var(--purple);}
 .late-tag{font-size:10px;font-weight:700;color:#e8522a;background:rgba(232,82,42,.15);padding:2px 7px;border-radius:8px;}
+.gps-flag-tag{font-size:10px;font-weight:700;color:var(--red);background:rgba(239,68,68,.12);padding:2px 7px;border-radius:8px;}
 .status-pending{color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;font-size:11px;font-weight:700;padding:3px 10px;white-space:nowrap;}
 .status-approved{color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:20px;font-size:11px;font-weight:700;padding:3px 10px;white-space:nowrap;}
 .status-rejected{color:var(--red);background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:20px;font-size:11px;font-weight:700;padding:3px 10px;white-space:nowrap;}
@@ -1458,7 +1528,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.3.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.5.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -1787,7 +1857,19 @@ textarea.form-input{resize:none;}
         <div class="form-group"><label class="form-label">Default Punch-In Time</label><input type="time" class="form-input" id="set-punch-time"></div>
         <button class="btn btn-primary btn-sm" onclick="saveBizSettings()">Save Settings</button>
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
-        <div class="form-label">Business ID <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;">(share with staff to connect new devices)</span></div>
+        <div class="card-title">📍 Store Location (for GPS check)</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Set your store's GPS coordinates. Staff punching from outside this radius will be flagged ⚠️ for review.</p>
+        <div class="two-col">
+          <div class="form-group"><label class="form-label">Latitude</label><input type="number" step="any" class="form-input" id="set-store-lat" placeholder="e.g. 19.2813"></div>
+          <div class="form-group"><label class="form-label">Longitude</label><input type="number" step="any" class="form-input" id="set-store-lng" placeholder="e.g. 73.0479"></div>
+        </div>
+        <div class="form-group"><label class="form-label">Allowed Radius (meters)</label><input type="number" class="form-input" id="set-store-radius" placeholder="300" value="300"></div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary btn-sm" onclick="saveStoreLocation()">Save Location</button>
+          <button class="btn btn-ghost btn-sm" onclick="detectStoreLocation()">📍 Use My Current Location</button>
+        </div>
+        <p style="font-size:11px;color:var(--muted);margin-top:8px;" id="store-loc-status"></p>
+      </div>
         <div style="display:flex;gap:8px;align-items:center;">
           <div id="biz-id-display" style="flex:1;background:var(--s2);border:1.5px solid var(--border);border-radius:var(--rs);padding:11px 13px;font-size:12px;font-family:monospace;color:var(--muted);word-break:break-all;"></div>
           <button class="btn btn-ghost btn-sm" onclick="copyBizId()" style="flex-shrink:0;">Copy</button>
@@ -1826,7 +1908,7 @@ textarea.form-input{resize:none;}
     <div class="page" id="owner-qr">
       <div class="card" style="text-align:center;">
         <div class="card-title">Store QR Code</div>
-        <p style="color:var(--muted);font-size:13px;margin-bottom:18px;">Print & keep at the counter. Staff scan this before punching in/out.</p>
+        <p style="color:var(--muted);font-size:13px;margin-bottom:18px;">Print &amp; stick at the counter. Staff scan this before punching in/out.</p>
         <div class="qr-box"><div id="qr-render"></div></div>
         <p style="font-size:12px;color:var(--muted);margin-bottom:14px;" id="qr-label-text"></p>
         <button class="btn btn-primary" onclick="printQR()">🖨️ Print QR Code</button>
@@ -2002,7 +2084,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.3.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.5.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2010,17 +2092,45 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.3.0 -->
+    <!-- v1.5.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.3.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.5.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>GPS location check on every punch — flags if outside store radius</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Distance from store shown on each punch record (e.g. 45m, 1.2km)</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>⚠️ LOCATION badge on flagged punches in Today &amp; Reports</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Store GPS coordinates + allowed radius configurable in Settings</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>"Use My Current Location" button for easy store setup</span></div>
+      </div>
+    </div>
+    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
+    <!-- v1.4.0 -->
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--text);">v1.4.0</span>
+        <span style="font-size:11px;color:var(--muted);">Multi-device Login</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
         <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Login from any device using owner username &amp; password</span></div>
         <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>"I already have an account" flow on landing screen</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Connect button unresponsive (ES module scope bug)</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Firestore rules blocking new device login</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Connect button unresponsive (ES module scope)</span></div>
+      </div>
+    </div>
+    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
+    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
+    <!-- v1.3.0 -->
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--text);">v1.3.0</span>
+        <span style="font-size:11px;color:var(--muted);">PWA + Notifications</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Installable PWA — add to home screen on mobile &amp; desktop</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Push notifications for punch, leave &amp; advance events</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Profile section with version history (👤 button)</span></div>
       </div>
     </div>
     <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
