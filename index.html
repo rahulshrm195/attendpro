@@ -204,16 +204,17 @@ window.completeSetup = async function(){
   const pt    = v('setup-punch-time');
   const ou    = v('setup-owner-user').toLowerCase();
   const op    = v('setup-owner-pass');
-  if(!name)      return toast('Enter business name',true);
-  if(!ou)        return toast('Enter owner username',true);
+  const cc    = v('setup-company-code').toUpperCase().replace(/\s/g,'');
+  if(!name)           return toast('Enter business name',true);
+  if(!ou)             return toast('Enter owner username',true);
   if(!op||op.length<4) return toast('Password must be 4+ characters',true);
+  if(!cc||cc.length<4||cc.length>10) return toast('Company code must be 4–10 characters',true);
 
   setLoading(true,'Creating your business…');
   try {
-    // Generate unique biz ID
     BIZ_ID = 'biz_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
     localStorage.setItem('ap_biz_id', BIZ_ID);
-    biz = {name, location:loc, ownerUser:ou, ownerPass:op, createdAt:new Date().toISOString()};
+    biz = {name, location:loc, ownerUser:ou, ownerPass:op, companyCode:cc, createdAt:new Date().toISOString()};
     settings = {punchInTime:pt||'10:00'};
     await fbSet(p.biz(), biz);
     await fbSet(p.settings(), settings);
@@ -1165,6 +1166,9 @@ function loadOwnerSettings(){
   document.getElementById('manual-date').value=new Date().toISOString().split('T')[0];
   const bizIdEl=document.getElementById('biz-id-display');
   if(bizIdEl) bizIdEl.textContent=BIZ_ID||'—';
+  // Company code
+  const ccEl=document.getElementById('company-code-display');
+  if(ccEl) ccEl.textContent=biz?.companyCode||'—';
   // Load store GPS settings
   if(settings.storeLat) document.getElementById('set-store-lat').value=settings.storeLat;
   if(settings.storeLng) document.getElementById('set-store-lng').value=settings.storeLng;
@@ -1214,6 +1218,16 @@ window.toggleTheme=function(){
   }
 })();
 
+window.shareCompanyCode=function(){
+  const code=biz?.companyCode;
+  if(!code) return toast('No company code set',true);
+  const msg=`Join ${biz.name} on AttendPro!\n\nCompany Code: *${code}*\n\n1. Open: https://rahulshrm195.github.io/attendpro/\n2. Tap "I'm Staff — Join My Company"\n3. Enter code: ${code}`;
+  if(navigator.share){
+    navigator.share({title:'Join '+biz.name+' on AttendPro',text:msg}).catch(()=>{});
+  } else {
+    navigator.clipboard.writeText(msg).then(()=>toast('✓ Copied — paste in WhatsApp!')).catch(()=>toast('Code: '+code));
+  }
+};
 window.copyBizId=function(){
   if(!BIZ_ID) return;
   navigator.clipboard.writeText(BIZ_ID).then(()=>toast('✓ Business ID copied!')).catch(()=>{
@@ -1453,6 +1467,39 @@ window._setLoading = setLoading;
 window._toast      = toast;
 
 // Device login — find business by ownerUser+ownerPass, save BIZ_ID, boot
+// ─────────────────────────────────────────────
+//  STAFF CONNECT — join via company code
+// ─────────────────────────────────────────────
+window.staffConnect = async function(){
+  const code = (document.getElementById('staff-company-code')?.value||'').trim().toUpperCase();
+  if(!code||code.length<4) return toast('Enter your company code',true);
+  setLoading(true,'Finding your company…');
+  try{
+    const allBiz = await fbList('businesses');
+    const match  = allBiz.find(b => b.companyCode === code);
+    if(!match){
+      setLoading(false);
+      return toast('Company code not found — check with your employer',true);
+    }
+    BIZ_ID = match.id;
+    localStorage.setItem('ap_biz_id', BIZ_ID);
+    biz      = match;
+    const sett = await fbGet(p.settings());
+    if(sett) settings = sett;
+    staffArr = await fbList(p.staff());
+    ls.set('ap_biz_cache', biz);
+    ls.set('ap_staff_cache', staffArr);
+    ls.set('ap_settings_cache', settings);
+    setLoading(false);
+    toast('✓ Connected to '+biz.name+'!');
+    document.getElementById('login-biz-name').textContent = biz.name;
+    showScreen('screen-login');
+  }catch(e){
+    setLoading(false);
+    toast('Error: '+e.message, true);
+  }
+};
+
 window.deviceLogin = async function(){
   const u  = document.getElementById('device-owner-user')?.value.trim().toLowerCase();
   const pw = document.getElementById('device-owner-pass')?.value;
@@ -1721,7 +1768,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.8.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.9.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -1730,8 +1777,9 @@ textarea.form-input{resize:none;}
     <div class="feature-card"><div class="feature-icon">☁️</div><div class="feature-title">Cloud Sync</div><div class="feature-desc">Real-time Firebase sync across all devices</div></div>
   </div>
   <div style="padding:0 16px 48px;display:flex;flex-direction:column;gap:10px;">
-    <button class="btn btn-primary" onclick="showScreen('screen-setup')" style="font-size:16px;padding:16px;">🚀 Set Up My Business</button>
-    <button class="btn btn-secondary" onclick="showScreen('screen-device-login')">I already have an account</button>
+    <button class="btn btn-primary" onclick="showScreen('screen-staff-connect')" style="font-size:16px;padding:16px;">👤 I'm Staff — Join My Company</button>
+    <button class="btn btn-secondary" onclick="showScreen('screen-setup')">🏢 Set Up My Business</button>
+    <button class="btn btn-ghost" onclick="showScreen('screen-device-login')" style="font-size:13px;color:var(--muted);">🔐 Owner on a new device</button>
   </div>
 </div>
 
@@ -1757,12 +1805,41 @@ textarea.form-input{resize:none;}
       <div class="form-group"><label class="form-label">Username</label><input class="form-input" id="setup-owner-user" placeholder="e.g. rahul" autocapitalize="off"></div>
       <div class="form-group"><label class="form-label">Password (min 4 chars)</label><input type="password" class="form-input" id="setup-owner-pass" placeholder="••••••••"></div>
     </div>
+    <div class="card">
+      <div class="card-title">Staff Company Code</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Staff enter this code to connect their phone. Keep it simple and easy to share — e.g. <strong style="color:var(--text);">AMAR24</strong></p>
+      <div class="form-group"><label class="form-label">Company Code (4–10 chars)</label><input class="form-input" id="setup-company-code" placeholder="e.g. AMAR24" autocapitalize="characters" autocorrect="off" style="font-family:var(--fh);font-weight:700;letter-spacing:2px;font-size:18px;text-transform:uppercase;"></div>
+    </div>
     <button class="btn btn-primary" onclick="completeSetup()" style="font-size:15px;">Create Business →</button>
   </div>
 </div>
 
 <!-- ══════════════════════════════════
-     DEVICE LOGIN (new device)
+     STAFF CONNECT (new staff device)
+══════════════════════════════════ -->
+<div class="screen" id="screen-staff-connect">
+  <div class="top-bar">
+    <div><div class="tb-title">AttendPro</div><div class="tb-sub">Join Your Company</div></div>
+    <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-landing')">← Back</button>
+  </div>
+  <div style="padding:28px 20px;max-width:360px;margin:0 auto;">
+    <div style="font-size:54px;text-align:center;margin-bottom:14px;">👋</div>
+    <div class="section-title" style="text-align:center;">Enter Company Code</div>
+    <div class="section-sub" style="text-align:center;margin-bottom:28px;">Ask your employer for the company code. You only need to do this once.</div>
+    <div class="form-group">
+      <input class="form-input" id="staff-company-code" placeholder="e.g. AMAR24"
+        autocapitalize="characters" autocorrect="off" autocomplete="off" spellcheck="false"
+        style="font-family:var(--fh);font-weight:800;letter-spacing:4px;font-size:24px;text-align:center;text-transform:uppercase;"
+        oninput="this.value=this.value.toUpperCase()"
+        onkeydown="if(event.key==='Enter')staffConnect()">
+    </div>
+    <button class="btn btn-primary" onclick="staffConnect()" style="font-size:15px;padding:15px;">Join Company →</button>
+    <p style="text-align:center;font-size:12px;color:var(--muted);margin-top:16px;">This connects your phone to your employer's business. Your attendance data goes to them.</p>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     DEVICE LOGIN (owner on new device)
 ══════════════════════════════════ -->
 <div class="screen" id="screen-device-login">
   <div class="top-bar">
@@ -2074,6 +2151,15 @@ textarea.form-input{resize:none;}
       </div><!-- /card store location -->
 
       <div class="card">
+        <div class="card-title">Staff Company Code</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Share this code with your staff. They enter it once to connect their phone.</p>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <div id="company-code-display" style="flex:1;background:var(--s2);border:1.5px solid var(--border);border-radius:var(--rs);padding:14px;font-size:22px;font-family:var(--fh);font-weight:800;letter-spacing:4px;text-align:center;color:var(--accent);"></div>
+          <button class="btn btn-ghost btn-sm" onclick="shareCompanyCode()">Share</button>
+        </div>
+      </div><!-- /card company code -->
+
+      <div class="card">
         <div class="card-title">Business ID</div>
         <p style="font-size:12px;color:var(--muted);margin-bottom:8px;">Share with staff to connect new devices.</p>
         <div style="display:flex;gap:8px;align-items:center;">
@@ -2294,7 +2380,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.8.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.9.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2302,10 +2388,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.8.0 -->
+    <!-- v1.9.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.8.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.9.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
