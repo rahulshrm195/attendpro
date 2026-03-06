@@ -3,10 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta http-equiv="Pragma" content="no-cache">
-<meta http-equiv="Expires" content="0">
-<!-- build: 20260306-v1.5.0 -->
 <meta name="theme-color" content="#0a0a0f">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -369,6 +365,7 @@ window.retakeSelfie=function(){
 window.confirmPunch=async function(){
   stopCamera();
   const now=new Date(),ts=formatTime(now),today=todayStr();
+  const isoTs=now.toISOString(); // full ISO timestamp
   const key=p.rec(currentStaff.id,today);
   let rec=null;
   try{rec=await fbGet(key);}catch{}
@@ -382,27 +379,32 @@ window.confirmPunch=async function(){
     );
     const lat=pos.coords.latitude, lng=pos.coords.longitude, acc=Math.round(pos.coords.accuracy);
     gpsData={lat,lng,accuracy:acc};
-    // Compare to store location if set
     const storeLat=settings.storeLat, storeLng=settings.storeLng, radius=settings.storeRadius||300;
     if(storeLat&&storeLng){
       const dist=Math.round(haversineM(lat,lng,storeLat,storeLng));
       gpsData.dist=dist;
-      gpsData.flagged=dist>(radius+acc); // outside allowed radius + accuracy buffer
+      gpsData.flagged=dist>(radius+acc);
     }
-  }catch(e){
-    gpsData={error:'GPS unavailable'};
-  }
+  }catch(e){ gpsData={error:'GPS unavailable'}; }
 
   if(punchAction==='in'){
-    rec.inTime=ts;rec.inSelfie=capturedSelfie;rec.late=isLate(now,currentStaff);
+    rec.inTime=ts; rec.inISO=isoTs;
+    rec.inSelfie=capturedSelfie; rec.late=isLate(now,currentStaff);
     rec.inGps=gpsData;
     if(gpsData.flagged) rec.gpsFlag=true;
     if(gpsData.dist!=null) rec.inDist=gpsData.dist;
   } else {
-    rec.outTime=ts;rec.outSelfie=capturedSelfie;
+    rec.outTime=ts; rec.outISO=isoTs;
+    rec.outSelfie=capturedSelfie;
     rec.outGps=gpsData;
     if(gpsData.flagged&&!rec.gpsFlag) rec.gpsFlag=true;
     if(gpsData.dist!=null) rec.outDist=gpsData.dist;
+    // Calculate exact hours worked
+    if(rec.inISO){
+      const mins=Math.round((now-new Date(rec.inISO))/60000);
+      rec.workedMins=mins;
+      rec.workedDisplay=minsToHM(mins);
+    }
   }
 
   try{
@@ -417,7 +419,11 @@ window.confirmPunch=async function(){
   document.getElementById('punch-success-wrap').style.display='block';
   document.getElementById('success-title').textContent=punchAction==='in'?'✓ Punched In!':'✓ Punched Out!';
   const distTxt=gpsData.dist!=null?` · ${gpsData.dist}m from store`:'';
+  const workedTxt=rec.workedDisplay&&punchAction==='out'?` · ${rec.workedDisplay} worked`:'';
   const flagTxt=gpsData.flagged?' · ⚠️ Location flag':'';
+  document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late':''}${distTxt}${workedTxt}${flagTxt}`;
+  sendNotif(punchAction==='in'?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}${gpsData.flagged?' · ⚠️ Location flagged':''}`,'punch');
+};
   document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late':''}${distTxt}${flagTxt}`;
   sendNotif(punchAction==='in'?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}${gpsData.flagged?' · ⚠️ Location flagged':''}`,'punch');
 };
@@ -547,17 +553,32 @@ window.backToStaffLogin=function(){
   document.getElementById('login-biz-name').textContent=biz?.name||'AttendPro';
   showScreen('screen-login');
 };
+let _inboxListener=null; // real-time listener handle
+
 window.ownerLogin=function(){
   const u=v('owner-user-inp').toLowerCase(),pw=v('owner-pass-inp');
   if(u===biz.ownerUser&&pw===biz.ownerPass){
     document.getElementById('owner-login-wrap').style.display='none';
     document.getElementById('owner-panel-wrap').style.display='block';
     document.getElementById('owner-biz-title').textContent=biz.name;
-    loadOwnerSettings();renderOwnerToday();populateDropdowns();renderQRCode();updateInboxBadge();
+    loadOwnerSettings();renderOwnerToday();populateDropdowns();renderQRCode();
     requestNotifPermission();
+    // ── Real-time inbox badge listener ──
+    if(_inboxListener) _inboxListener(); // unsub previous
+    _inboxListener = fbLiveCol(p.requests(), docs=>{
+      const pending = docs.filter(d=>d.status==='pending').length;
+      const tab=document.getElementById('owner-inbox-tab');
+      const quickBtn=document.getElementById('quick-inbox-btn');
+      if(tab) tab.textContent = pending>0 ? `Inbox (${pending})` : 'Inbox';
+      if(quickBtn) quickBtn.textContent = pending>0 ? `📬 Inbox (${pending})` : '📬 Inbox';
+      // Re-render inbox if it's currently open
+      const inboxPage=document.getElementById('owner-inbox');
+      if(inboxPage?.classList.contains('active')) renderInbox();
+    });
   }else{toast('Wrong credentials',true);document.getElementById('owner-pass-inp').value='';}
 };
 window.ownerLogout=function(){
+  if(_inboxListener){_inboxListener();_inboxListener=null;} // cleanup listener
   document.getElementById('owner-login-wrap').style.display='block';
   document.getElementById('owner-panel-wrap').style.display='none';
   document.getElementById('owner-user-inp').value='';
@@ -602,7 +623,7 @@ async function renderOwnerToday(){
       let status=`<span class="chip chip-red">Not In</span>`;
       if(rec?.inTime&&rec?.outTime)status=`<span class="chip chip-blue">Done</span>`;
       else if(rec?.inTime)status=`<span class="chip chip-green">In</span>`;
-      html+=`<div class="row"><div class="row-main"><div class="row-title">${s.name}${rec?.late?' <span class="late-tag">LATE</span>':''}${rec?.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':''}</div><div class="row-sub">In: ${rec?.inTime||'—'} · Out: ${rec?.outTime||'—'}${rec?.inDist!=null?' · '+rec.inDist+'m from store':''}</div></div>${status}
+      html+=`<div class="row"><div class="row-main"><div class="row-title">${s.name}${rec?.late?' <span class="late-tag">LATE</span>':''}${rec?.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':''}</div><div class="row-sub">In: ${rec?.inTime||'—'} · Out: ${rec?.outTime||'—'}${rec?.workedDisplay?' · '+rec.workedDisplay:''}${rec?.inDist!=null?' · '+rec.inDist+'m from store':''}</div></div>${status}
       ${rec?.inSelfie?`<img class="selfie-thumb" src="${rec.inSelfie}" onclick="openSelfieModal('${s.name}','${rec.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`;
     });
     const late=active.filter(s=>recs[s.id+'_'+today]?.late).map(s=>s.name);
@@ -733,8 +754,95 @@ window.renderReport=async function(){
 window.changeReportMonth=function(d){reportMonthOff+=d;renderReport();};
 
 // ─────────────────────────────────────────────
-//  PAYROLL ENGINE
+//  EXPORT — CSV + PDF
 // ─────────────────────────────────────────────
+window.exportAttendanceCSV=async function(){
+  const staffSel=document.getElementById('report-staff')?.value||'all';
+  const now=new Date();
+  const d=new Date(now.getFullYear(),now.getMonth()+reportMonthOff,1);
+  const year=d.getFullYear(),month=d.getMonth();
+  const monthLabel=d.toLocaleDateString('en-IN',{month:'long',year:'numeric'});
+  setLoading(true,'Preparing export…');
+  try{
+    const allRecs=await fbList(p.recs());
+    const filtered=allRecs.filter(r=>{
+      const rd=new Date(r.date);
+      return rd.getFullYear()===year&&rd.getMonth()===month&&(staffSel==='all'||r.staffId===staffSel);
+    });
+    const rows=[
+      ['Staff Name','Date','Punch In','Punch Out','Hours Worked','Late','GPS Flag','Distance (m)','Notes'],
+      ...filtered.map(r=>[
+        r.staffName||'',
+        r.date||'',
+        r.inTime||'',
+        r.outTime||'',
+        r.workedDisplay||minsToHM(r.workedMins)||'',
+        r.late?'Yes':'No',
+        r.gpsFlag?'⚠️ Flagged':'',
+        r.inDist!=null?r.inDist:'',
+        r.manual?'Manual entry':''
+      ])
+    ];
+    const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=`AttendPro_${biz?.name||'Attendance'}_${monthLabel}.csv`;
+    document.body.appendChild(a);a.click();document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast(`✓ Exported ${filtered.length} records`);
+  }catch(e){toast('Export failed: '+e.message,true);}
+  setLoading(false);
+};
+
+window.exportAttendancePDF=async function(){
+  const staffSel=document.getElementById('report-staff')?.value||'all';
+  const now=new Date();
+  const d=new Date(now.getFullYear(),now.getMonth()+reportMonthOff,1);
+  const year=d.getFullYear(),month=d.getMonth();
+  const monthLabel=d.toLocaleDateString('en-IN',{month:'long',year:'numeric'});
+  setLoading(true,'Preparing PDF…');
+  try{
+    const allRecs=await fbList(p.recs());
+    const filtered=allRecs.filter(r=>{
+      const rd=new Date(r.date);
+      return rd.getFullYear()===year&&rd.getMonth()===month&&(staffSel==='all'||r.staffId===staffSel);
+    }).sort((a,b)=>a.date.localeCompare(b.date)||a.staffName.localeCompare(b.staffName));
+    const staffName=staffSel==='all'?'All Staff':(staffArr.find(s=>s.id===staffSel)?.name||'');
+    const totalWorked=filtered.reduce((s,r)=>s+(r.workedMins||0),0);
+    const rows=filtered.map(r=>`
+      <tr style="border-bottom:1px solid #eee;">
+        <td style="padding:7px 10px;">${r.staffName}</td>
+        <td style="padding:7px 10px;">${r.date}</td>
+        <td style="padding:7px 10px;">${r.inTime||'—'}</td>
+        <td style="padding:7px 10px;">${r.outTime||'—'}</td>
+        <td style="padding:7px 10px;font-weight:600;">${r.workedDisplay||minsToHM(r.workedMins)||'—'}</td>
+        <td style="padding:7px 10px;">${r.late?'<span style="color:#e8522a;font-weight:700;">Late</span>':''}</td>
+        <td style="padding:7px 10px;">${r.gpsFlag?'<span style="color:#ef4444;font-weight:700;">⚠️</span>':''}</td>
+      </tr>`).join('');
+    const w=window.open('','_blank');
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+      <title>Attendance — ${monthLabel}</title>
+      <style>body{font-family:Arial,sans-serif;padding:30px;color:#111;}
+      h1{font-size:22px;margin-bottom:4px;}
+      .meta{color:#666;font-size:13px;margin-bottom:20px;}
+      table{width:100%;border-collapse:collapse;font-size:13px;}
+      th{background:#f5f5f5;padding:8px 10px;text-align:left;font-weight:700;border-bottom:2px solid #ddd;}
+      tr:nth-child(even){background:#fafafa;}
+      .footer{margin-top:20px;font-size:12px;color:#999;}</style></head>
+      <body>
+      <h1>📋 Attendance Report — ${monthLabel}</h1>
+      <div class="meta">${biz?.name||''}${biz?.location?' · '+biz.location:''} &nbsp;|&nbsp; ${staffName} &nbsp;|&nbsp; ${filtered.length} records &nbsp;|&nbsp; Total: ${minsToHM(totalWorked)}</div>
+      <table><thead><tr><th>Staff</th><th>Date</th><th>In</th><th>Out</th><th>Hours</th><th>Late</th><th>GPS</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+      <div class="footer">Generated by AttendPro · ${new Date().toLocaleDateString('en-IN',{dateStyle:'long'})}</div>
+      </body></html>`);
+    w.document.close();
+    w.setTimeout(()=>w.print(), 600);
+    w.document.close();
+  }catch(e){toast('PDF failed: '+e.message,true);}
+  setLoading(false);
+};
 async function getSalaryCfg(sid){
   try{const cfg=await fbGet(p.salary(sid));return cfg||defaultSalaryCfg();}
   catch{return ls.get('ap_salary_'+sid,defaultSalaryCfg());}
@@ -921,19 +1029,48 @@ window.addStaff=async function(){
 function renderStaffList(){
   const el=document.getElementById('staff-list-display');if(!el)return;
   if(!staffArr.length){el.innerHTML='<div class="empty-state"><div class="emoji">👥</div>No staff yet</div>';return;}
-  el.innerHTML=staffArr.map(s=>`
-    <div class="staff-quick-card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-        <div><div style="font-weight:700;font-size:15px">${s.name}</div><div style="font-size:12px;color:var(--muted)">@${s.username} · ${s.active?'Active':'Inactive'}</div></div>
-        <span class="${s.active?'status-approved':'status-rejected'}">${s.active?'Active':'Off'}</span>
+  const today=todayStr();
+  el.innerHTML=staffArr.map((s,i)=>`
+    <div class="staff-quick-card" style="${!s.active?'opacity:0.6;':''}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-family:var(--fh);font-weight:800;color:#fff;font-size:15px;flex-shrink:0;">${s.name.charAt(0).toUpperCase()}</div>
+          <div>
+            <div style="font-weight:700;font-size:15px;">${s.name}</div>
+            <div style="font-size:12px;color:var(--muted);">@${s.username} · Staff #${i+1}</div>
+          </div>
+        </div>
+        <span class="${s.active?'status-approved':'status-rejected'}">${s.active?'Active':'Inactive'}</span>
       </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn btn-ghost btn-xs" onclick="openSalarySettings('${s.id}')">₹ Salary</button>
         <button class="btn btn-ghost btn-xs" onclick="editPin('${s.id}')">Change PIN</button>
+        <button class="btn btn-ghost btn-xs" onclick="editStaffName('${s.id}')">✏️ Rename</button>
         <button class="btn btn-ghost btn-xs" onclick="toggleStaff('${s.id}')">${s.active?'Disable':'Enable'}</button>
+        <button class="btn btn-ghost btn-xs" style="color:var(--red);" onclick="deleteStaff('${s.id}','${s.name}')">🗑️</button>
       </div>
     </div>`).join('');
 }
+
+window.editStaffName=async function(id){
+  const s=staffArr.find(x=>x.id===id);if(!s)return;
+  const name=prompt(`New name for ${s.name}:`,'');
+  if(!name||!name.trim())return;
+  try{
+    await updateDoc(doc(db,p.staffDoc(id)),{name:name.trim()});
+    s.name=name.trim();ls.set('ap_staff_cache',staffArr);
+    renderStaffList();populateDropdowns();toast('✓ Name updated');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+window.deleteStaff=async function(id,name){
+  if(!confirm(`Delete ${name}? This cannot be undone. Their attendance records will remain.`))return;
+  try{
+    await deleteDoc(doc(db,p.staffDoc(id)));
+    staffArr=staffArr.filter(x=>x.id!==id);
+    ls.set('ap_staff_cache',staffArr);
+    renderStaffList();populateDropdowns();toast(`✓ ${name} removed`);
+  }catch(e){toast('Error: '+e.message,true);}
+};
 
 window.toggleStaff=async function(id){
   const s=staffArr.find(x=>x.id===id);if(!s)return;
@@ -1108,7 +1245,9 @@ function renderQRCode(){
 window.printQR=function(){
   const el=document.getElementById('qr-render');
   const w=window.open('','_blank');
-  w.document.write(`<html><body style="text-align:center;padding:40px;font-family:sans-serif"><h2>${biz?.name}</h2><p style="color:#666;margin-bottom:24px">${biz?.location||''} · Scan to Punch In / Out</p>${el.innerHTML}<p style="color:#999;font-size:12px;margin-top:16px">Staff only</p><script>window.onload=()=>window.print()<\/script></body></html>`);
+  w.document.write(`<html><body style="text-align:center;padding:40px;font-family:sans-serif"><h2>${biz?.name}</h2><p style="color:#666;margin-bottom:24px">${biz?.location||''} · Scan to Punch In / Out</p>${el.innerHTML}<p style="color:#999;font-size:12px;margin-top:16px">Staff only</p></body></html>`);
+  w.document.close();
+  w.setTimeout(()=>w.print(), 600);
   w.document.close();
 };
 
@@ -1152,8 +1291,9 @@ td.g{color:#22c55e;}td.re{color:#ef4444;}
 <div class="net"><div class="nl">Net Payable</div><div class="nv">${g('pb-net')}</div></div>
 ${payRec?`<div style="font-size:11px;color:#777;margin-bottom:8px">Paid: ${payRec.mode} · ${payRec.date}${payRec.note?' · '+payRec.note:''}</div>`:''}
 <div class="foot">AttendPro · ${new Date().toLocaleDateString('en-IN')}</div>
-</div><script>window.onload=()=>window.print()<\/script></body></html>`);
+</div></body></html>`);
     w.document.close();
+    w.setTimeout(()=>w.print(), 600);
   }).catch(()=>toast('Error generating slip',true));
 };
 
@@ -1240,6 +1380,7 @@ window.showScreen = function(id){document.querySelectorAll('.screen').forEach(s=
 function v(id){return document.getElementById(id)?.value?.trim()||'';}
 function todayStr(){const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;}
 function pad(n){return n<10?'0'+n:''+n;}
+function minsToHM(m){if(!m||m<0)return'—';const h=Math.floor(m/60),mn=m%60;return h>0?`${h}h ${mn}m`:`${mn}m`;}
 function formatTime(d){return fmt12(`${pad(d.getHours())}:${pad(d.getMinutes())}`);}
 function fmt12(t){const [h,m]=t.split(':').map(Number);return `${pad(h%12||12)}:${pad(m)} ${h<12?'AM':'PM'}`;}
 function isLate(d,staff){
@@ -1532,7 +1673,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.5.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.6.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -1773,7 +1914,13 @@ textarea.form-input{resize:none;}
         </div>
         <p style="font-size:11px;color:var(--muted);margin-top:8px;">Orange dot on day = late arrival</p>
       </div>
-      <div class="card"><div class="card-title">Log</div><div class="scroll-list" id="report-log"></div></div>
+      <div class="card"><div class="card-title">Log</div>
+        <div class="scroll-list" id="report-log"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+          <button class="btn btn-ghost btn-sm" onclick="exportAttendanceCSV()" style="flex:1;">📊 Export CSV</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportAttendancePDF()" style="flex:1;">🖨️ Print / PDF</button>
+        </div>
+      </div>
     </div>
     <!-- PAYROLL -->
     <div class="page" id="owner-payroll">
@@ -1860,31 +2007,38 @@ textarea.form-input{resize:none;}
         <div class="form-group"><label class="form-label">Location</label><input class="form-input" id="set-biz-loc"></div>
         <div class="form-group"><label class="form-label">Default Punch-In Time</label><input type="time" class="form-input" id="set-punch-time"></div>
         <button class="btn btn-primary btn-sm" onclick="saveBizSettings()">Save Settings</button>
-      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
-        <div class="card-title">📍 Store Location (for GPS check)</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Set your store's GPS coordinates. Staff punching from outside this radius will be flagged ⚠️ for review.</p>
+      </div><!-- /card business settings -->
+
+      <div class="card">
+        <div class="card-title">📍 Store Location (GPS Check)</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Staff punching from outside this radius will be flagged ⚠️ for review.</p>
         <div class="two-col">
           <div class="form-group"><label class="form-label">Latitude</label><input type="number" step="any" class="form-input" id="set-store-lat" placeholder="e.g. 19.2813"></div>
           <div class="form-group"><label class="form-label">Longitude</label><input type="number" step="any" class="form-input" id="set-store-lng" placeholder="e.g. 73.0479"></div>
         </div>
         <div class="form-group"><label class="form-label">Allowed Radius (meters)</label><input type="number" class="form-input" id="set-store-radius" placeholder="300" value="300"></div>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" onclick="saveStoreLocation()">Save Location</button>
           <button class="btn btn-ghost btn-sm" onclick="detectStoreLocation()">📍 Use My Current Location</button>
         </div>
         <p style="font-size:11px;color:var(--muted);margin-top:8px;" id="store-loc-status"></p>
-      </div>
+      </div><!-- /card store location -->
+
+      <div class="card">
+        <div class="card-title">Business ID</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:8px;">Share with staff to connect new devices.</p>
         <div style="display:flex;gap:8px;align-items:center;">
           <div id="biz-id-display" style="flex:1;background:var(--s2);border:1.5px solid var(--border);border-radius:var(--rs);padding:11px 13px;font-size:12px;font-family:monospace;color:var(--muted);word-break:break-all;"></div>
-          <button class="btn btn-ghost btn-sm" onclick="copyBizId()" style="flex-shrink:0;">Copy</button>
+          <button class="btn btn-ghost btn-sm" onclick="copyBizId()">Copy</button>
         </div>
-      </div>
-      </div>
+      </div><!-- /card biz id -->
+
       <div class="card">
         <div class="card-title">Change Owner Password</div>
         <div class="form-group"><label class="form-label">New Password</label><input type="password" class="form-input" id="set-owner-pass"></div>
         <button class="btn btn-secondary btn-sm" onclick="changeOwnerPass()">Update Password</button>
-      </div>
+      </div><!-- /card change pass -->
+
       <div class="card">
         <div class="card-title">Mark Holiday / Leave</div>
         <div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="mark-date"></div>
@@ -1892,11 +2046,13 @@ textarea.form-input{resize:none;}
           <select class="form-input form-select" id="mark-type" onchange="toggleMarkStaff()">
             <option value="holiday">🏖️ Public Holiday (all staff)</option>
             <option value="leave">🤒 Leave (specific staff)</option>
-          </select></div>
+          </select>
+        </div>
         <div class="form-group" id="mark-staff-grp" style="display:none;"><label class="form-label">Staff</label><select class="form-input form-select" id="mark-staff-sel"></select></div>
         <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="mark-note" placeholder="e.g. Diwali, Sick leave"></div>
         <button class="btn btn-primary" onclick="markDay()">Mark Day</button>
-      </div>
+      </div><!-- /card mark holiday -->
+
       <div class="card">
         <div class="card-title">Manual Attendance Entry</div>
         <div class="form-group"><label class="form-label">Staff</label><select class="form-input form-select" id="manual-staff"></select></div>
@@ -1906,8 +2062,9 @@ textarea.form-input{resize:none;}
           <div class="form-group"><label class="form-label">Punch Out</label><input type="time" class="form-input" id="manual-out"></div>
         </div>
         <button class="btn btn-primary" onclick="manualEntry()">Save Entry</button>
-      </div>
-    </div>
+      </div><!-- /card manual entry -->
+
+    </div><!-- /page owner-settings -->
     <!-- QR -->
     <div class="page" id="owner-qr">
       <div class="card" style="text-align:center;">
@@ -2088,7 +2245,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.5.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.6.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2096,18 +2253,33 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.5.0 -->
+    <!-- v1.6.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.5.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.6.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>GPS location check on every punch — flags if outside store radius</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Distance from store shown on each punch record (e.g. 45m, 1.2km)</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>⚠️ LOCATION badge on flagged punches in Today &amp; Reports</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Store GPS coordinates + allowed radius configurable in Settings</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>"Use My Current Location" button for easy store setup</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Settings cards bleeding into all tabs (broken div structure)</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>ISO timestamps on every punch — exact hours &amp; minutes worked calculated</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Hours worked shown on punch-out success screen and Today view</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Real-time inbox badge — updates live via Firestore listener</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Export attendance to CSV — all records with hours, GPS flags</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Print / PDF attendance report with summary</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Staff management — rename, delete staff, avatar initials</span></div>
+      </div>
+    </div>
+    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
+    <!-- v1.5.0 -->
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--text);">v1.5.0</span>
+        <span style="font-size:11px;color:var(--muted);">GPS Location Flagging</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>GPS check on every punch — flags if outside store radius</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Distance from store shown on each record</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Store GPS + allowed radius configurable in Settings</span></div>
       </div>
     </div>
     <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
@@ -2123,7 +2295,6 @@ window.joinBusiness = async function(){
         <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Connect button unresponsive (ES module scope)</span></div>
       </div>
     </div>
-    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
     <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
     <!-- v1.3.0 -->
     <div style="margin-bottom:16px;">
