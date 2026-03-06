@@ -560,6 +560,9 @@ window.ownerLogin=function(){
     document.getElementById('owner-biz-title').textContent=biz.name;
     loadOwnerSettings();renderOwnerToday();populateDropdowns();renderQRCode();
     requestNotifPermission();
+    // Sync theme button icon
+    const themeBtn=document.getElementById('theme-btn');
+    if(themeBtn) themeBtn.textContent=document.body.classList.contains('light-theme')?'🌙':'☀️';
     // ── Real-time inbox badge listener ──
     if(_inboxListener) _inboxListener(); // unsub previous
     _inboxListener = fbLiveCol(p.requests(), docs=>{
@@ -1169,6 +1172,25 @@ window.detectStoreLocation=function(){
     toast('✓ Location detected — click Save Location');
   },()=>toast('Could not get location',true),{timeout:8000});
 };
+// ─────────────────────────────────────────────
+//  THEME TOGGLE
+// ─────────────────────────────────────────────
+window.toggleTheme=function(){
+  const isLight=document.body.classList.toggle('light-theme');
+  localStorage.setItem('ap_theme', isLight ? 'light' : 'dark');
+  const btn=document.getElementById('theme-btn');
+  if(btn) btn.textContent = isLight ? '🌙' : '☀️';
+  // Update PWA theme-color meta
+  const meta=document.querySelector('meta[name="theme-color"]');
+  if(meta) meta.content = isLight ? '#f0f2f5' : '#0a0a0f';
+};
+// Apply saved theme on load (runs immediately — body exists at this point)
+(function(){
+  if(localStorage.getItem('ap_theme')==='light'){
+    document.body.classList.add('light-theme');
+  }
+})();
+
 window.copyBizId=function(){
   if(!BIZ_ID) return;
   navigator.clipboard.writeText(BIZ_ID).then(()=>toast('✓ Business ID copied!')).catch(()=>{
@@ -1505,6 +1527,12 @@ boot();
   --text:#f0f0f5;--muted:#7070a0;--muted2:#50506a;
   --fh:'Syne',sans-serif;--fb:'DM Sans',sans-serif;
   --r:16px;--rs:10px;
+  --topbar-bg:rgba(10,10,15,.94);
+}
+body.light-theme{
+  --bg:#f0f2f5;--s1:#ffffff;--s2:#f5f6fa;--s3:#eaecf2;--border:#dde1ec;
+  --text:#111827;--muted:#6b7280;--muted2:#9ca3af;
+  --topbar-bg:rgba(240,242,245,.94);
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 body{background:var(--bg);color:var(--text);font-family:var(--fb);min-height:100vh;overflow-x:hidden;}
@@ -1516,7 +1544,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);min-height:100
 .screen{display:none;min-height:100vh;}
 .screen.active{display:block;animation:fadeUp .3s ease both;}
 /* top bar */
-.top-bar{position:sticky;top:0;z-index:50;background:rgba(10,10,15,.94);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:13px 20px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.top-bar{position:sticky;top:0;z-index:50;background:var(--topbar-bg);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:13px 20px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
 .tb-title{font-family:var(--fh);font-size:15px;font-weight:700;}
 .tb-sub{font-size:11px;color:var(--muted);margin-top:1px;}
 /* tabs */
@@ -1670,7 +1698,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.6.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.7.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -1866,6 +1894,7 @@ textarea.form-input{resize:none;}
     <div class="top-bar">
       <div><div class="tb-title" id="owner-biz-title">AttendPro</div><div class="tb-sub">Owner Panel</div></div>
       <div style="display:flex;align-items:center;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="toggleTheme()" id="theme-btn" style="padding:7px 10px;font-size:15px;">☀️</button>
         <button class="btn btn-ghost btn-sm" onclick="openProfile()" style="padding:7px 10px;">👤</button>
         <button class="btn btn-ghost btn-sm" onclick="ownerLogout()">Logout</button>
       </div>
@@ -2242,7 +2271,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.6.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.7.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2250,10 +2279,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.6.0 -->
+    <!-- v1.7.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.6.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.7.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
