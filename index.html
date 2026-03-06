@@ -424,9 +424,6 @@ window.confirmPunch=async function(){
   document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late':''}${distTxt}${workedTxt}${flagTxt}`;
   sendNotif(punchAction==='in'?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}${gpsData.flagged?' · ⚠️ Location flagged':''}`,'punch');
 };
-  document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late':''}${distTxt}${flagTxt}`;
-  sendNotif(punchAction==='in'?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}${gpsData.flagged?' · ⚠️ Location flagged':''}`,'punch');
-};
 
 // Haversine distance in meters
 function haversineM(lat1,lng1,lat2,lng2){
