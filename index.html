@@ -122,12 +122,7 @@ let punchAction='in', capturedSelfie=null, qrScanner=null;
 let clockTick=null, reportMonthOff=0, myMonthOff=0;
 let editingSalaryStaffId=null;
 let unsubListeners = [];
-// Rotating 30-second QR — photo replay attack prevention
-function validQRCodes(){
-  const w=Math.floor(Date.now()/30000), bp=BIZ_ID||'NOBIZ';
-  return ['ATTENDPRO_'+bp+'_'+w,'ATTENDPRO_'+bp+'_'+(w-1)];
-}
-function currentQRCode(){return validQRCodes()[0];}
+const STORE_QR = 'ATTENDPRO_STORE_QR_V1';
 const session = ()=>ls.get('ap_session',null);
 const saveSession = (v)=>ls.set('ap_session',v);
 
@@ -364,7 +359,7 @@ function startQR(){
   document.getElementById('qr-scanner-div').innerHTML='';
   qrScanner=new Html5Qrcode('qr-scanner-div');
   qrScanner.start({facingMode:'environment'},{fps:10,qrbox:{width:180,height:180}},
-    d=>{if(validQRCodes().includes(d)){stopQR();showSelfieStep();}else toast('❌ Wrong or expired QR',true);},
+    d=>{if(d===STORE_QR){stopQR();showSelfieStep();}else toast('❌ Wrong QR',true);},
     ()=>{}
   ).catch(()=>toast('Camera unavailable — tap Skip',true));
 }
@@ -637,7 +632,6 @@ window.ownerLogin=function(){
 };
 window.ownerLogout=function(){
   if(_inboxListener){_inboxListener();_inboxListener=null;}
-  if(qrRefreshTimer){clearInterval(qrRefreshTimer);qrRefreshTimer=null;}
   localStorage.removeItem('ap_owner_session'); // clear session
   document.getElementById('owner-login-wrap').style.display='block';
   document.getElementById('owner-panel-wrap').style.display='none';
@@ -1353,23 +1347,12 @@ function populateDropdowns(){
 // ─────────────────────────────────────────────
 //  QR
 // ─────────────────────────────────────────────
-let qrRefreshTimer=null;
 function renderQRCode(){
   const el=document.getElementById('qr-render');if(!el)return;
   el.innerHTML='';
-  try{new QRCode(el,{text:currentQRCode(),width:190,height:190,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});}catch(e){}
+  try{new QRCode(el,{text:STORE_QR,width:190,height:190,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});}catch(e){}
   const lbl=document.getElementById('qr-label-text');
   if(lbl)lbl.textContent=(biz?.name||'AttendPro')+(biz?.location?' · '+biz.location:'');
-  if(qrRefreshTimer)clearInterval(qrRefreshTimer);
-  const cd=document.getElementById('qr-countdown');
-  qrRefreshTimer=setInterval(()=>{
-    const secsLeft=30-Math.floor((Date.now()/1000)%30);
-    if(cd){cd.textContent='Refreshes in '+secsLeft+'s';cd.style.color=secsLeft<=5?'var(--danger)':'var(--muted)';}
-    if(secsLeft===30){
-      const qEl=document.getElementById('qr-render');
-      if(qEl){qEl.innerHTML='';try{new QRCode(qEl,{text:currentQRCode(),width:190,height:190,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});}catch(e){}}
-    }
-  },1000);
 }
 window.printQR=function(){
   const el=document.getElementById('qr-render');
@@ -2286,8 +2269,7 @@ textarea.form-input{resize:none;}
         <div class="card-title">Store QR Code</div>
         <p style="color:var(--muted);font-size:13px;margin-bottom:18px;">Print &amp; stick at the counter. Staff scan this before punching in/out.</p>
         <div class="qr-box"><div id="qr-render"></div></div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:4px;" id="qr-label-text"></p>
-        <p style="font-size:12px;color:var(--accent);margin-bottom:14px;" id="qr-countdown"></p>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:14px;" id="qr-label-text"></p>
         <button class="btn btn-primary" onclick="printQR()">🖨️ Print QR Code</button>
       </div>
     </div>
