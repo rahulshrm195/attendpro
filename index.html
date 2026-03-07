@@ -294,6 +294,16 @@ window.showStaffTab=function(tab,btn){
   if(tab==='history')renderMyHistory();
 };
 
+// ── Session display helpers ──
+function sessionsLine(sessions,short){
+  if(!sessions||sessions.length===0) return null;
+  return sessions.map(function(ss,i){
+    var w=ss.workedDisplay?' ('+ss.workedDisplay+')':'';
+    return 'S'+(i+1)+': '+(ss.inTime||'—')+'→'+(ss.outTime||'…')+(short?'':w);
+  }).join(' | ');
+}
+function sessionsLineShort(sessions){return sessionsLine(sessions,true);}
+
 async function renderStaffStatus(){
   const today=todayStr();
   let rec=null;
@@ -302,18 +312,22 @@ async function renderStaffStatus(){
   const btn=document.getElementById('staff-punch-btn');
   const content=document.getElementById('staff-status-content');
   btn.className='punch-btn';
-  if(!rec){
-    punchAction='in';
-    content.innerHTML=`<span class="chip chip-grey">Not yet punched in today</span>`;
-    btn.classList.add('punch-btn-in');btn.textContent='↓ Punch In';
-  } else if(rec.inTime&&!rec.outTime){
-    punchAction='out';
-    content.innerHTML=`<span class="chip chip-green">Punched In</span>${rec.late?' <span class="late-tag">LATE</span>':''}<div style="font-size:12px;color:var(--muted);margin-top:6px">In: ${rec.inTime}</div>`;
+        var todaySessions=rec&&rec.sessions?rec.sessions:[];
+      var lastSess=todaySessions[todaySessions.length-1];
+      var sl=sessionsLine(todaySessions)||('In: '+(rec&&rec.inTime?rec.inTime:'—')+' · Out: '+(rec&&rec.outTime?rec.outTime:'—'));
+      var thumbSelfie=lastSess&&lastSess.inSelfie?lastSess.inSelfie:(rec&&rec.inSelfie?rec.inSelfie:null);
+      var totalLbl=rec&&rec.workedDisplay?' · Total: '+rec.workedDisplay:'';
+      var nameTitle=s.name+(rec&&rec.late?' <span class="late-tag">LATE</span>':'')+(rec&&rec.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':'');
+      var safeName=s.name.replace(/'/g,'');
+      var safeTime=rec&&rec.inTime?rec.inTime:'';
+      var thumbHtml=thumbSelfie?('<img class="selfie-thumb" src="'+thumbSelfie+'" onclick="openSelfieModal(\'' +safeName+ '\',\''+safeTime+'\',this.src)">'):'<div class="selfie-ph">📷</div>';
+      html+='<div class="row"><div class="row-main"><div class="row-title">'+nameTitle+'</div><div class="row-sub">'+sl+totalLbl+'</div></div>'+status+thumbHtml+'</div>';
     btn.classList.add('punch-btn-out');btn.textContent='↑ Punch Out';
   } else {
-    punchAction='done';
-    content.innerHTML=`<span class="chip chip-blue">Completed ✓</span><div style="font-size:12px;color:var(--muted);margin-top:6px">In: ${rec.inTime} · Out: ${rec.outTime}</div>`;
-    btn.classList.add('punch-btn-done');btn.textContent='All done today ✓';
+    punchAction='in';
+    const sessCount=sessions.length;
+    content.innerHTML=`<span class="chip chip-blue">${sessCount} session${sessCount>1?'s':''} today ✓</span><div style="font-size:12px;color:var(--muted);margin-top:6px">Total: ${totalDisplay||'—'} · Last out: ${lastSession.outTime}</div>`;
+    btn.classList.add('punch-btn-in');btn.textContent='↓ Punch In Again';
   }
 }
 
@@ -355,7 +369,6 @@ function startQR(){
     ()=>{}
   ).catch(()=>toast('Camera unavailable — tap Skip',true));
 }
-window.skipQR=function(){stopQR();showSelfieStep();};
 function stopQR(){if(qrScanner){try{qrScanner.stop();}catch(e){}qrScanner=null;}}
 function showSelfieStep(){
   document.getElementById('punch-qr-wrap').style.display='none';
@@ -387,47 +400,64 @@ window.retakeSelfie=function(){
 window.confirmPunch=async function(){
   stopCamera();
   const now=new Date(),ts=formatTime(now),today=todayStr();
-  const isoTs=now.toISOString(); // full ISO timestamp
+  const isoTs=now.toISOString();
   const key=p.rec(currentStaff.id,today);
   let rec=null;
   try{rec=await fbGet(key);}catch{}
-  if(!rec) rec={staffId:currentStaff.id,staffName:currentStaff.name,date:today};
+  if(!rec) rec={staffId:currentStaff.id,staffName:currentStaff.name,date:today,sessions:[]};
+  if(!rec.sessions) rec.sessions=[];
 
   // ── GPS check ──
   let gpsData={};
   try{
-    const pos = await new Promise((resolve,reject)=>
+    const pos=await new Promise((resolve,reject)=>
       navigator.geolocation.getCurrentPosition(resolve,reject,{timeout:6000,maximumAge:30000})
     );
-    const lat=pos.coords.latitude, lng=pos.coords.longitude, acc=Math.round(pos.coords.accuracy);
+    const lat=pos.coords.latitude,lng=pos.coords.longitude,acc=Math.round(pos.coords.accuracy);
     gpsData={lat,lng,accuracy:acc};
-    const storeLat=settings.storeLat, storeLng=settings.storeLng, radius=settings.storeRadius||300;
+    const storeLat=settings.storeLat,storeLng=settings.storeLng,radius=settings.storeRadius||300;
     if(storeLat&&storeLng){
       const dist=Math.round(haversineM(lat,lng,storeLat,storeLng));
       gpsData.dist=dist;
       gpsData.flagged=dist>(radius+acc);
     }
-  }catch(e){ gpsData={error:'GPS unavailable'}; }
+  }catch(e){gpsData={error:'GPS unavailable'};}
+
+  const sessions=rec.sessions;
+  const lastSession=sessions[sessions.length-1];
+  const openSession=lastSession&&!lastSession.outTime;
 
   if(punchAction==='in'){
-    rec.inTime=ts; rec.inISO=isoTs;
-    rec.inSelfie=capturedSelfie; rec.late=isLate(now,currentStaff);
-    rec.inGps=gpsData;
-    if(gpsData.flagged) rec.gpsFlag=true;
-    if(gpsData.dist!=null) rec.inDist=gpsData.dist;
-  } else {
-    rec.outTime=ts; rec.outISO=isoTs;
-    rec.outSelfie=capturedSelfie;
-    rec.outGps=gpsData;
-    if(gpsData.flagged&&!rec.gpsFlag) rec.gpsFlag=true;
-    if(gpsData.dist!=null) rec.outDist=gpsData.dist;
-    // Calculate exact hours worked
-    if(rec.inISO){
-      const mins=Math.round((now-new Date(rec.inISO))/60000);
-      rec.workedMins=mins;
-      rec.workedDisplay=minsToHM(mins);
+    // Start a new session
+    const isFirst=sessions.length===0;
+    const newSession={inTime:ts,inISO:isoTs,inSelfie:capturedSelfie,inGps:gpsData};
+    if(gpsData.dist!=null) newSession.inDist=gpsData.dist;
+    if(gpsData.flagged) newSession.gpsFlag=true;
+    sessions.push(newSession);
+    if(isFirst){
+      rec.late=isLate(now,currentStaff);
+      rec.inTime=ts; // keep top-level for backward compat display
     }
+    if(gpsData.flagged) rec.gpsFlag=true;
+  } else if(openSession){
+    // Close the current open session
+    openSession.outTime=ts;
+    openSession.outISO=isoTs;
+    openSession.outSelfie=capturedSelfie;
+    openSession.outGps=gpsData;
+    if(gpsData.dist!=null) openSession.outDist=gpsData.dist;
+    if(gpsData.flagged){openSession.gpsFlag=true;rec.gpsFlag=true;}
+    // Calc this session's minutes
+    const mins=Math.round((now-new Date(openSession.inISO))/60000);
+    openSession.workedMins=mins;
+    openSession.workedDisplay=minsToHM(mins);
+    // Recalc total across all sessions
+    const totalMins=sessions.filter(s=>s.workedMins).reduce((a,s)=>a+s.workedMins,0);
+    rec.workedMins=totalMins;
+    rec.workedDisplay=minsToHM(totalMins);
+    rec.outTime=ts; // keep top-level updated to latest out
   }
+  rec.sessions=sessions;
 
   try{
     await fbSet(key,rec);
@@ -436,15 +466,21 @@ window.confirmPunch=async function(){
     ls.set('ap_rec_cache_'+currentStaff.id+'_'+today,rec);
     toast('⚠️ Saved locally — will sync when online');
   }
+
+  // ── Success screen ──
   capturedSelfie=null;
   document.getElementById('punch-selfie-wrap').style.display='none';
   document.getElementById('punch-success-wrap').style.display='block';
-  document.getElementById('success-title').textContent=punchAction==='in'?'✓ Punched In!':'✓ Punched Out!';
+  const isIn=punchAction==='in';
+  const sessNum=sessions.length;
+  const sessionLabel=sessNum>1?` (Session ${sessNum})`:'';
+  document.getElementById('success-title').textContent=isIn?`✓ Punched In!${sessionLabel}`:'✓ Punched Out!';
   const distTxt=gpsData.dist!=null?` · ${gpsData.dist}m from store`:'';
-  const workedTxt=rec.workedDisplay&&punchAction==='out'?` · ${rec.workedDisplay} worked`:'';
+  const totalMinsNow=sessions.filter(s=>s.workedMins).reduce((a,s)=>a+s.workedMins,0);
+  const workedTxt=!isIn&&totalMinsNow>0?` · ${minsToHM(totalMinsNow)} total today`:'';
   const flagTxt=gpsData.flagged?' · ⚠️ Location flag':'';
-  document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&punchAction==='in'?' · Late':''}${distTxt}${workedTxt}${flagTxt}`;
-  sendNotif(punchAction==='in'?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}${gpsData.flagged?' · ⚠️ Location flagged':''}`,'punch');
+  document.getElementById('success-sub').textContent=`${currentStaff.name} · ${ts}${rec.late&&isIn?' · Late':''}${distTxt}${workedTxt}${flagTxt}`;
+  sendNotif(isIn?'Punched In ✓':'Punched Out ✓',`${currentStaff.name} · ${ts}${gpsData.flagged?' · ⚠️ Location flagged':''}`,'punch');
 };
 
 // Haversine distance in meters
@@ -551,10 +587,13 @@ async function renderMyHistory(){
     drawCal('my-cal',d.getFullYear(),d.getMonth(),currentStaff.id,recs,marks);
     drawStats('my-stats',currentStaff.id,d.getFullYear(),d.getMonth(),recs,marks);
     const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,20);
-    document.getElementById('my-log').innerHTML=list.length?list.map(r=>`
-      <div class="row"><div class="row-main"><div class="row-title">${r.date}${r.late?' <span class="late-tag">LATE</span>':''}</div><div class="row-sub">In: ${r.inTime||'—'} · Out: ${r.outTime||'—'}</div></div>
-      ${r.inSelfie?`<img class="selfie-thumb" src="${r.inSelfie}" onclick="openSelfieModal('${r.staffName}','${r.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`).join('')
-      :'<div class="empty-state"><div class="emoji">📅</div>No records</div>';
+    document.getElementById('my-log').innerHTML=list.length?list.map(function(r){
+      var sl=sessionsLine(r.sessions)||('In: '+(r.inTime||'—')+' · Out: '+(r.outTime||'—'));
+      var totalLbl=r.workedDisplay?' · Total: '+r.workedDisplay:'';
+      var lateHtml=r.late?' <span class="late-tag">LATE</span>':'';
+      var thumb=r.inSelfie?('<img class="selfie-thumb" src="'+r.inSelfie+'" onclick="openSelfieModal(''+r.staffName+'',''+r.inTime+'',this.src)">'):'<div class="selfie-ph">📷</div>';
+      return '<div class="row"><div class="row-main"><div class="row-title">'+r.date+lateHtml+'</div><div class="row-sub">'+sl+totalLbl+'</div></div>'+thumb+'</div>';
+    }).join(''):'<div class="empty-state"><div class="emoji">📅</div>No records</div>';
   }catch(e){document.getElementById('my-log').innerHTML='<div class="empty-state">Error loading history</div>';}
   setLoading(false);
 }
@@ -647,8 +686,9 @@ async function renderOwnerToday(){
       let status=`<span class="chip chip-red">Not In</span>`;
       if(rec?.inTime&&rec?.outTime)status=`<span class="chip chip-blue">Done</span>`;
       else if(rec?.inTime)status=`<span class="chip chip-green">In</span>`;
-      html+=`<div class="row"><div class="row-main"><div class="row-title">${s.name}${rec?.late?' <span class="late-tag">LATE</span>':''}${rec?.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':''}</div><div class="row-sub">In: ${rec?.inTime||'—'} · Out: ${rec?.outTime||'—'}${rec?.workedDisplay?' · '+rec.workedDisplay:''}${rec?.inDist!=null?' · '+rec.inDist+'m from store':''}</div></div>${status}
-      ${rec?.inSelfie?`<img class="selfie-thumb" src="${rec.inSelfie}" onclick="openSelfieModal('${s.name}','${rec.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`;
+      const sessions=rec?.sessions||[];
+      const lastSess=sessions[sessions.length-1];
+
     });
     const late=active.filter(s=>recs[s.id+'_'+today]?.late).map(s=>s.name);
     if(late.length)html+=`<div class="divider"></div><div style="color:var(--accent2);font-size:12px;font-weight:700">⚠️ Late: ${late.join(', ')}</div>`;
@@ -767,11 +807,15 @@ window.renderReport=async function(){
     if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks);
     else document.getElementById('report-stats').innerHTML='';
     const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,30);
-    document.getElementById('report-log').innerHTML=list.length?list.map(r=>`
-      <div class="row"><div class="row-main"><div class="row-title">${r.staffName}${r.late?' <span class="late-tag">LATE</span>':''}${r.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':''}${r.manual?' <span style="font-size:10px;color:var(--muted)">(manual)</span>':''}</div>
-      <div class="row-sub">${r.date} · In: ${r.inTime||'—'} · Out: ${r.outTime||'—'}${r.inDist!=null?' · '+r.inDist+'m':''}</div></div>
-      ${r.inSelfie?`<img class="selfie-thumb" src="${r.inSelfie}" onclick="openSelfieModal('${r.staffName}','${r.inTime}',this.src)">`:'<div class="selfie-ph">📷</div>'}</div>`).join('')
-      :'<div class="empty-state"><div class="emoji">📅</div>No records</div>';
+    document.getElementById('report-log').innerHTML=list.length?list.map(function(r){
+      var sl=sessionsLineShort(r.sessions)||('In: '+(r.inTime||'—')+' · Out: '+(r.outTime||'—'));
+      var totalLbl=r.workedDisplay?' · '+r.workedDisplay:'';
+      var lateHtml=r.late?' <span class="late-tag">LATE</span>':'';
+      var gpsHtml=r.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':'';
+      var manHtml=r.manual?' <span style="font-size:10px;color:var(--muted)">(manual)</span>':'';
+      var thumb=r.inSelfie?('<img class="selfie-thumb" src="'+r.inSelfie+'" onclick="openSelfieModal(''+r.staffName+'',''+r.inTime+'',this.src)">'):'<div class="selfie-ph">📷</div>';
+      return '<div class="row"><div class="row-main"><div class="row-title">'+r.staffName+lateHtml+gpsHtml+manHtml+'</div><div class="row-sub">'+r.date+' · '+sl+totalLbl+'</div></div>'+thumb+'</div>';
+    }).join(''):'<div class="empty-state"><div class="emoji">📅</div>No records</div>';
   }catch(e){document.getElementById('report-log').innerHTML='<div class="empty-state">Error: '+e.message+'</div>';}
   setLoading(false);
 };
@@ -793,20 +837,18 @@ window.exportAttendanceCSV=async function(){
       const rd=new Date(r.date);
       return rd.getFullYear()===year&&rd.getMonth()===month&&(staffSel==='all'||r.staffId===staffSel);
     });
-    const rows=[
-      ['Staff Name','Date','Punch In','Punch Out','Hours Worked','Late','GPS Flag','Distance (m)','Notes'],
-      ...filtered.map(r=>[
-        r.staffName||'',
-        r.date||'',
-        r.inTime||'',
-        r.outTime||'',
-        r.workedDisplay||minsToHM(r.workedMins)||'',
-        r.late?'Yes':'No',
-        r.gpsFlag?'⚠️ Flagged':'',
-        r.inDist!=null?r.inDist:'',
-        r.manual?'Manual entry':''
-      ])
-    ];
+    const rows=[['Staff Name','Date','Session','Punch In','Punch Out','Hours','Late','GPS Flag','Dist (m)','Notes']];
+    filtered.forEach(r=>{
+      const sessions=r.sessions||[];
+      if(sessions.length>0){
+        sessions.forEach((ss,i)=>{
+          rows.push([r.staffName||'',r.date||'',`S${i+1}`,ss.inTime||'',ss.outTime||'',ss.workedDisplay||minsToHM(ss.workedMins)||'',i===0?(r.late?'Yes':'No'):'',ss.gpsFlag?'⚠️ Flagged':'',ss.inDist!=null?ss.inDist:'',r.manual?'Manual':'']);
+        });
+        rows.push([r.staffName||'',r.date||'','TOTAL','','',r.workedDisplay||minsToHM(r.workedMins)||'','','','','']);
+      } else {
+        rows.push([r.staffName||'',r.date||'','S1',r.inTime||'',r.outTime||'',r.workedDisplay||minsToHM(r.workedMins)||'',r.late?'Yes':'No',r.gpsFlag?'⚠️ Flagged':'',r.inDist!=null?r.inDist:'',r.manual?'Manual':'']);
+      }
+    });
     const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
     const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
     const url=URL.createObjectURL(blob);
@@ -834,16 +876,21 @@ window.exportAttendancePDF=async function(){
     }).sort((a,b)=>a.date.localeCompare(b.date)||a.staffName.localeCompare(b.staffName));
     const staffName=staffSel==='all'?'All Staff':(staffArr.find(s=>s.id===staffSel)?.name||'');
     const totalWorked=filtered.reduce((s,r)=>s+(r.workedMins||0),0);
-    const rows=filtered.map(r=>`
-      <tr style="border-bottom:1px solid #eee;">
-        <td style="padding:7px 10px;">${r.staffName}</td>
-        <td style="padding:7px 10px;">${r.date}</td>
-        <td style="padding:7px 10px;">${r.inTime||'—'}</td>
-        <td style="padding:7px 10px;">${r.outTime||'—'}</td>
-        <td style="padding:7px 10px;font-weight:600;">${r.workedDisplay||minsToHM(r.workedMins)||'—'}</td>
-        <td style="padding:7px 10px;">${r.late?'<span style="color:#e8522a;font-weight:700;">Late</span>':''}</td>
-        <td style="padding:7px 10px;">${r.gpsFlag?'<span style="color:#ef4444;font-weight:700;">⚠️</span>':''}</td>
-      </tr>`).join('');
+    var rows='';
+    var td=function(v,s){return '<td style="padding:7px 10px;'+(s||'')+'">'+v+'</td>';};
+    filtered.forEach(function(r){
+      var sessions=r.sessions||[];
+      var hasSess=sessions.length>0;
+      var srcSessions=hasSess?sessions:[{inTime:r.inTime,outTime:r.outTime,workedDisplay:r.workedDisplay,workedMins:r.workedMins,gpsFlag:r.gpsFlag}];
+      srcSessions.forEach(function(ss,i){
+        var lateHtml=i===0&&r.late?'<span style="color:#e8522a;font-weight:700;">Late</span>':'';
+        var gpsHtml=ss.gpsFlag?'<span style="color:#ef4444;font-weight:700;">⚠️</span>':'';
+        rows+='<tr style="border-bottom:1px solid #eee;">'+td(r.staffName)+td(r.date)+td('S'+(i+1),'color:#888;')+td(ss.inTime||'—')+td(ss.outTime||'—')+td(ss.workedDisplay||minsToHM(ss.workedMins)||'—','font-weight:600;')+td(lateHtml)+td(gpsHtml)+'</tr>';
+      });
+      if(sessions.length>1){
+        rows+='<tr style="background:#f9f9f9;font-weight:700;"><td colspan="2" style="padding:5px 10px;">'+r.staffName+'</td><td style="padding:5px 10px;color:#888;">TOTAL</td><td></td><td></td><td style="padding:5px 10px;">'+( r.workedDisplay||minsToHM(r.workedMins)||'—')+'</td><td></td><td></td></tr>';
+      }
+    });
     const w=window.open('','_blank');
     w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
       <title>Attendance — ${monthLabel}</title>
@@ -857,7 +904,7 @@ window.exportAttendancePDF=async function(){
       <body>
       <h1>📋 Attendance Report — ${monthLabel}</h1>
       <div class="meta">${biz?.name||''}${biz?.location?' · '+biz.location:''} &nbsp;|&nbsp; ${staffName} &nbsp;|&nbsp; ${filtered.length} records &nbsp;|&nbsp; Total: ${minsToHM(totalWorked)}</div>
-      <table><thead><tr><th>Staff</th><th>Date</th><th>In</th><th>Out</th><th>Hours</th><th>Late</th><th>GPS</th></tr></thead>
+      <table><thead><tr><th>Staff</th><th>Date</th><th>Sess</th><th>In</th><th>Out</th><th>Hours</th><th>Late</th><th>GPS</th></tr></thead>
       <tbody>${rows}</tbody></table>
       <div class="footer">Generated by AttendPro · ${new Date().toLocaleDateString('en-IN',{dateStyle:'long'})}</div>
       </body></html>`);
@@ -1768,7 +1815,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.9.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.10.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -1928,7 +1975,7 @@ textarea.form-input{resize:none;}
         <div id="qr-scanner-div"></div>
         <p style="color:var(--muted);font-size:12px;margin-top:10px;">Point camera at QR code</p>
       </div>
-      <button class="btn btn-ghost btn-sm" style="margin-bottom:10px;" onclick="skipQR()">⚡ Skip QR (Demo)</button>
+
       <button class="btn btn-secondary" onclick="cancelPunchFlow()">Cancel</button>
     </div>
     <!-- Selfie step -->
@@ -2380,7 +2427,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.9.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.10.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2388,10 +2435,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.9.0 -->
+    <!-- v1.10.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.9.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.10.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
