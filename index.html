@@ -929,7 +929,7 @@ async function getSalaryCfg(sid){
   try{const cfg=await fbGet(p.salary(sid));return cfg||defaultSalaryCfg();}
   catch{return ls.get('ap_salary_'+sid,defaultSalaryCfg());}
 }
-function defaultSalaryCfg(){return {base:0,weeklyOff:0,startTime:'10:00',endTime:'21:00',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3};}
+function defaultSalaryCfg(){return {base:0,weeklyOff:-1,startTime:'10:00',endTime:'21:00',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3};}
 
 async function populatePayrollDropdowns(){
   const active=staffArr.filter(s=>s.active);
@@ -984,7 +984,7 @@ window.renderPayroll=async function(){
       const ds=year+'-'+pad(month+1)+'-'+pad(i);
       const dow=new Date(year,month,i).getDay();
       const mark=marks[ds]||(marks[ds+'_'+sid]);
-      if(dow==cfg.weeklyOff||mark&&(mark.type==='holiday'||mark.type==='leave')){offDays++;continue;}
+      if((cfg.weeklyOff>=0&&dow==cfg.weeklyOff)||mark&&(mark.type==='holiday'||mark.type==='leave')){offDays++;continue;}
       workDays++;
       const rec=recs[sid+'_'+ds];
       if(rec&&rec.inTime){present++;if(rec.late)late++;
@@ -2477,8 +2477,10 @@ textarea.form-input{resize:none;}
     <div class="two-col">
       <div class="form-group"><label class="form-label">Weekly Off Day</label>
         <select class="form-input form-select" id="ss-weeklyoff">
+          <option value="-1">No Weekly Off (works all 7 days)</option>
           <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
-          <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option>
+          <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
+          <option value="6">Saturday</option>
         </select></div>
       <div class="form-group"><label class="form-label">OT Rate (₹/hr)</label><input type="number" class="form-input" id="ss-otrate" min="0"></div>
     </div>
