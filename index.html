@@ -1005,14 +1005,9 @@ window.renderPayroll=async function(){
     const otPay=Math.round((otMins/60)*(cfg.otRate||0));
     const incentive=parseInt(v('pay-incentive-inp'))||0;
 
-    // ── Advance Ledger ──
+    // ── Advance Ledger — single source of truth is advLedger balance ──
     const ledger=await fbGet(p.advLedger(sid)).catch(()=>null);
-    const advBalance=ledger&&ledger.balance>0?ledger.balance:0;
-    // New advances given this month
-    const monthAdvs=await fbList(p.advances(),where('staffId','==',sid)).catch(()=>[]);
-    const newThisMonth=monthAdvs.filter(function(a){return a.date&&a.date.startsWith(prefix)&&!a.countedInLedger;});
-    const newThisMonthTotal=newThisMonth.reduce(function(s,a){return s+(a.amount||0);},0);
-    const totalOutstanding=advBalance+newThisMonthTotal;
+    const totalOutstanding=ledger&&ledger.balance>0?ledger.balance:0;
 
     // Show advance panel
     const advPanel=document.getElementById('pay-advance-panel');
@@ -1021,8 +1016,8 @@ window.renderPayroll=async function(){
       if(totalOutstanding>0){
         advPanel.style.display='block';
         document.getElementById('adv-outstanding-total').textContent='₹'+totalOutstanding.toLocaleString('en-IN');
-        document.getElementById('adv-prev-balance').textContent='₹'+advBalance.toLocaleString('en-IN');
-        document.getElementById('adv-new-this-month').textContent='₹'+newThisMonthTotal.toLocaleString('en-IN');
+        document.getElementById('adv-prev-balance').textContent='—';
+        document.getElementById('adv-new-this-month').textContent='—';
         if(advInput&&!advInput.dataset.userEdited) advInput.value=totalOutstanding;
       } else {
         advPanel.style.display='none';
@@ -1073,25 +1068,16 @@ window.markAsPaid=async function(){
   const advActual=parseInt(out.dataset.advActual)||0;
   const advCarryFwd=parseInt(out.dataset.advCarryFwd)||0;
   const totalOutstanding=parseInt(out.dataset.totalOutstanding)||0;
-  const newIds=(out.dataset.newThisMonthIds||'').split(',').filter(Boolean);
   const staffName=staffArr.find(function(s){return s.id===sid;})&&staffArr.find(function(s){return s.id===sid;}).name;
   const payRec={staffId:sid,staffName:staffName,month:mv,net,mode,note,advRecovered:advActual,advCarryFwd:advCarryFwd,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()};
   setLoading(true,'Recording payment…');
   try{
-    // 1. Save payment record
     await fbSet(p.payment(sid,mv),payRec);
     await fbAdd(p.payHist(),payRec);
-    // 2. Update advance ledger balance (carry forward)
     if(totalOutstanding>0){
       await fbSet(p.advLedger(sid),{staffId:sid,staffName:staffName,balance:advCarryFwd,lastUpdated:new Date().toISOString(),lastMonth:mv});
-      // 3. Log this recovery in ledger log
       await fbAdd(p.advLedgerLog(),{type:'recovery',month:mv,recovered:advActual,balanceBefore:totalOutstanding,balanceAfter:advCarryFwd,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()});
-      // 4. Mark new-this-month advances as counted in ledger
-      for(var i=0;i<newIds.length;i++){
-        try{await updateDoc(doc(db,p.advances()+'/'+newIds[i]),{countedInLedger:true});}catch(e){}
-      }
     }
-    // 5. Reset advance input user-edited flag
     const advInput=document.getElementById('pay-advance-recover');
     if(advInput) delete advInput.dataset.userEdited;
     await renderPayroll();
@@ -1123,7 +1109,7 @@ window.giveAdvance=async function(){
   if(!date)return toast('Select date',true);
   const staffName=staffArr.find(function(s){return s.id===sid;})&&staffArr.find(function(s){return s.id===sid;}).name;
   try{
-    await fbAdd(p.advances(),{staffId:sid,staffName:staffName,amount,date,note,recovered:false,countedInLedger:false});
+    await fbAdd(p.advances(),{staffId:sid,staffName:staffName,amount,date,note,recovered:false,countedInLedger:true});
     // Update ledger balance
     const ledger=await fbGet(p.advLedger(sid)).catch(()=>null);
     const prev=ledger&&ledger.balance>0?ledger.balance:0;
@@ -1151,7 +1137,7 @@ window.giveQuickAdvance=async function(){
   if(!amount||amount<=0)return toast('Enter valid amount',true);
   const staffName=staffArr.find(function(s){return s.id===sid;})&&staffArr.find(function(s){return s.id===sid;}).name;
   try{
-    await fbAdd(p.advances(),{staffId:sid,staffName:staffName,amount,date,note,recovered:false,countedInLedger:false});
+    await fbAdd(p.advances(),{staffId:sid,staffName:staffName,amount,date,note,recovered:false,countedInLedger:true});
     const ledger=await fbGet(p.advLedger(sid)).catch(()=>null);
     const prev=ledger&&ledger.balance>0?ledger.balance:0;
     await fbSet(p.advLedger(sid),{staffId:sid,staffName:staffName,balance:prev+amount,lastUpdated:new Date().toISOString()});
@@ -1967,7 +1953,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.11.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.11.1</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -2283,11 +2269,7 @@ textarea.form-input{resize:none;}
           <!-- Advance Panel — shown only when outstanding exists -->
           <div id="pay-advance-panel" style="display:none;background:var(--card2,rgba(255,165,0,0.08));border:1.5px solid var(--accent);border-radius:12px;padding:14px;margin-bottom:14px;">
             <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:10px;">⚠️ Advance Outstanding</div>
-            <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:4px;">
-              <span>Previous balance</span><span id="adv-prev-balance">₹0</span></div>
-            <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:8px;">
-              <span>New this month</span><span id="adv-new-this-month">₹0</span></div>
-            <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;margin-bottom:12px;padding-top:8px;border-top:1px solid rgba(255,165,0,0.3);">
+            <div style="display:flex;justify-content:space-between;font-size:15px;font-weight:700;margin-bottom:12px;">
               <span>Total Outstanding</span><span id="adv-outstanding-total" style="color:var(--accent);">₹0</span></div>
             <div class="form-group" style="margin-bottom:6px;"><label class="form-label">Recover this month (₹)</label>
               <input type="number" class="form-input" id="pay-advance-recover" placeholder="0" min="0"
@@ -2595,7 +2577,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.11.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.11.1</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2603,10 +2585,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.11.0 -->
+    <!-- v1.11.1 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.11.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.11.1</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
