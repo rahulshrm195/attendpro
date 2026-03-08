@@ -757,7 +757,12 @@ window.approveReq=async function(id){
     const r=all.find(x=>x.id===id);if(!r){setLoading(false);return;}
     await updateDoc(doc(db,p.reqDoc(id)),{status:'approved',actionDate:new Date().toLocaleDateString('en-IN')});
     if(r.type==='advance'){
-      await fbAdd(p.advances(),{staffId:r.staffId,staffName:r.staffName,amount:r.amount,date:new Date().toISOString().split('T')[0],note:'Approved: '+r.reason,recovered:false,fromRequest:id});
+      await fbAdd(p.advances(),{staffId:r.staffId,staffName:r.staffName,amount:r.amount,date:new Date().toISOString().split('T')[0],note:'Approved: '+r.reason,recovered:false,countedInLedger:true,fromRequest:id});
+      // Update ledger balance
+      const ledger=await fbGet(p.advLedger(r.staffId)).catch(()=>null);
+      const prev=ledger&&ledger.balance>0?ledger.balance:0;
+      await fbSet(p.advLedger(r.staffId),{staffId:r.staffId,staffName:r.staffName,balance:prev+r.amount,lastUpdated:new Date().toISOString()});
+      await fbAdd(p.advLedgerLog(),{type:'given',amount:r.amount,date:new Date().toISOString().split('T')[0],note:'Approved request: '+(r.reason||''),balanceBefore:prev,balanceAfter:prev+r.amount,ts:Date.now()});
     }
     if(r.type==='leave'){
       const days=getDayRange(r.from,r.to);
@@ -768,7 +773,7 @@ window.approveReq=async function(id){
       });
       await batch.commit();
     }
-    toast('✓ Approved');renderInbox();updateInboxBadge();
+    toast('✓ Approved');renderInbox();updateInboxBadge();populatePayrollDropdowns();
     sendNotif('Request Approved ✓',`${r.type==='leave'?'Leave':'Advance'} request for ${r.staffName} approved`,'req-approved');
   }catch(e){toast('Error: '+e.message,true);}
   setLoading(false);
@@ -1149,6 +1154,17 @@ window.giveQuickAdvance=async function(){
 async function renderAdvList(){
   const el=document.getElementById('adv-list');if(!el)return;
   try{
+    // ── Repair: fix any advances from approved requests that missed ledger update ──
+    const allAdvs=await fbList(p.advances()).catch(()=>[]);
+    const needsRepair=allAdvs.filter(function(a){return a.fromRequest&&!a.countedInLedger&&!a.recovered;});
+    for(var ri=0;ri<needsRepair.length;ri++){
+      var ra=needsRepair[ri];
+      var rLedger=await fbGet(p.advLedger(ra.staffId)).catch(()=>null);
+      var rPrev=rLedger&&rLedger.balance>0?rLedger.balance:0;
+      await fbSet(p.advLedger(ra.staffId),{staffId:ra.staffId,staffName:ra.staffName,balance:rPrev+ra.amount,lastUpdated:new Date().toISOString()});
+      await updateDoc(doc(db,p.advances()+'/'+ra.id),{countedInLedger:true});
+    }
+
     const active=staffArr.filter(function(s){return s.active;});
     // Build ledger summary per staff
     var summaryHtml='<div style="margin-bottom:14px;">';
@@ -1951,7 +1967,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.11.4</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.11.5</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -2575,7 +2591,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.11.4</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.11.5</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2583,10 +2599,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.11.4 -->
+    <!-- v1.11.5 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.11.4</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.11.5</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
