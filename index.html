@@ -105,6 +105,8 @@ const p = {
   reqDoc:    (id)=>`businesses/${BIZ_ID}/requests/${id}`,
   advances:  ()=>`businesses/${BIZ_ID}/advances`,
   advDoc:    (id)=>`businesses/${BIZ_ID}/advances/${id}`,
+  advLedger: (sid)=>`businesses/${BIZ_ID}/advance_ledger/${sid}`,
+  advLedgerLog: (sid)=>`businesses/${BIZ_ID}/advance_ledger_log/${sid}`,
   salary:    (sid)=>`businesses/${BIZ_ID}/salary_config/${sid}`,
   payment:   (sid,month)=>`businesses/${BIZ_ID}/payments/${sid}_${month}`,
   payHist:   ()=>`businesses/${BIZ_ID}/payment_history`,
@@ -929,16 +931,29 @@ async function getSalaryCfg(sid){
 }
 function defaultSalaryCfg(){return {base:0,weeklyOff:0,startTime:'10:00',endTime:'21:00',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3};}
 
-function populatePayrollDropdowns(){
+async function populatePayrollDropdowns(){
   const active=staffArr.filter(s=>s.active);
-  ['pay-staff-sel','adv-staff-sel'].forEach(id=>{
+  // Build advance outstanding map for badges
+  const advMap={};
+  try{
+    for(var i=0;i<active.length;i++){
+      var s=active[i];
+      var ledger=await fbGet(p.advLedger(s.id)).catch(()=>null);
+      if(ledger&&ledger.balance>0) advMap[s.id]=ledger.balance;
+    }
+  }catch(e){}
+  ['pay-staff-sel','adv-staff-sel'].forEach(function(id){
     const el=document.getElementById(id);if(!el)return;
-    const cur=el.value;el.innerHTML='<option value="">Select…</option>';
-    active.forEach(s=>el.innerHTML+=`<option value="${s.id}">${s.name}</option>`);
+    const cur=el.value;
+    el.innerHTML='<option value="">Select…</option>';
+    active.forEach(function(s){
+      const badge=advMap[s.id]?' ⚠️ ₹'+advMap[s.id].toLocaleString('en-IN')+' adv':'';
+      el.innerHTML+='<option value="'+s.id+'">'+s.name+badge+'</option>';
+    });
     if(cur)el.value=cur;
   });
   const pm=document.getElementById('pay-month');
-  if(pm&&!pm.value){const n=new Date();pm.value=`${n.getFullYear()}-${pad(n.getMonth()+1)}`;}
+  if(pm&&!pm.value){const n=new Date();pm.value=n.getFullYear()+'-'+pad(n.getMonth()+1);}
   const ad=document.getElementById('adv-date');
   if(ad&&!ad.value)ad.value=new Date().toISOString().split('T')[0];
 }
@@ -948,61 +963,98 @@ window.renderPayroll=async function(){
   const out=document.getElementById('payroll-output');
   if(!sid||!mv){out.style.display='none';return;}
   const [year,month]=[parseInt(mv.split('-')[0]),parseInt(mv.split('-')[1])-1];
-  const staff=staffArr.find(s=>s.id===sid);if(!staff){out.style.display='none';return;}
+  const staff=staffArr.find(function(s){return s.id===sid;});if(!staff){out.style.display='none';return;}
   out.style.display='block';
   setLoading(true,'Calculating payroll…');
   try{
     const cfg=await getSalaryCfg(sid);
     const ml=new Date(year,month,1).toLocaleString('default',{month:'long',year:'numeric'});
     document.getElementById('pay-hero-month').textContent=ml;
-    const prefix=`${year}-${pad(month+1)}`;
+    const prefix=year+'-'+pad(month+1);
     const recsAll=await fbList(p.recs(),where('staffId','==',sid),where('date','>=',prefix+'-01'),where('date','<=',prefix+'-31'));
-    const recs={};recsAll.forEach(r=>recs[r.staffId+'_'+r.date]=r);
+    const recs={};recsAll.forEach(function(r){recs[r.staffId+'_'+r.date]=r;});
     const marksAll=await fbList(p.days());
-    const marks={};marksAll.filter(m=>m.date?.startsWith(prefix)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
+    const marks={};marksAll.filter(function(m){return m.date&&m.date.startsWith(prefix);}).forEach(function(m){marks[m.date+(m.staffId?'_'+m.staffId:'')]=m;});
     const dim=new Date(year,month+1,0).getDate();
     const now=new Date(),isCur=(year===now.getFullYear()&&month===now.getMonth());
     const upto=isCur?now.getDate():dim;
-    let workDays=0,present=0,absent=0,late=0,offDays=0,otMins=0;
+    var workDays=0,present=0,absent=0,late=0,offDays=0,otMins=0;
     const [endH,endM]=cfg.endTime.split(':').map(Number);
-    for(let i=1;i<=upto;i++){
-      const ds=`${year}-${pad(month+1)}-${pad(i)}`;
+    for(var i=1;i<=upto;i++){
+      const ds=year+'-'+pad(month+1)+'-'+pad(i);
       const dow=new Date(year,month,i).getDay();
       const mark=marks[ds]||(marks[ds+'_'+sid]);
-      if(dow==cfg.weeklyOff||mark?.type==='holiday'||mark?.type==='leave'){offDays++;continue;}
+      if(dow==cfg.weeklyOff||mark&&(mark.type==='holiday'||mark.type==='leave')){offDays++;continue;}
       workDays++;
-      const rec=recs[`${sid}_${ds}`];
-      if(rec?.inTime){present++;if(rec.late)late++;
+      const rec=recs[sid+'_'+ds];
+      if(rec&&rec.inTime){present++;if(rec.late)late++;
         if(rec.outTime){const[oh,om]=parseTime12(rec.outTime);const diff=(oh*60+om)-(endH*60+endM);if(diff>0)otMins+=diff;}
       }else absent++;
     }
     const perDay=workDays>0?cfg.base/workDays:0;
     const absentD=Math.round(absent*perDay);
-    let lateD=0;
+    var lateD=0;
     if(cfg.lateRule==='fixed')lateD=late*(cfg.lateAmount||0);
     else if(cfg.lateRule==='halfday')lateD=Math.floor(late/(cfg.lateHalfAfter||3))*Math.round(perDay/2);
     const otH=Math.floor(otMins/60),otM=otMins%60;
     const otPay=Math.round((otMins/60)*(cfg.otRate||0));
     const incentive=parseInt(v('pay-incentive-inp'))||0;
-    const advRecover=parseInt(v('pay-advance-recover'))||0;
-    const net=Math.max(0,cfg.base+otPay+incentive-absentD-lateD-advRecover);
-    const R=(id,val)=>{const el=document.getElementById(id);if(el)el.textContent=val;};
+
+    // ── Advance Ledger ──
+    const ledger=await fbGet(p.advLedger(sid)).catch(()=>null);
+    const advBalance=ledger&&ledger.balance>0?ledger.balance:0;
+    // New advances given this month
+    const monthAdvs=await fbList(p.advances(),where('staffId','==',sid)).catch(()=>[]);
+    const newThisMonth=monthAdvs.filter(function(a){return a.date&&a.date.startsWith(prefix)&&!a.countedInLedger;});
+    const newThisMonthTotal=newThisMonth.reduce(function(s,a){return s+(a.amount||0);},0);
+    const totalOutstanding=advBalance+newThisMonthTotal;
+
+    // Show advance panel
+    const advPanel=document.getElementById('pay-advance-panel');
+    const advInput=document.getElementById('pay-advance-recover');
+    if(advPanel){
+      if(totalOutstanding>0){
+        advPanel.style.display='block';
+        document.getElementById('adv-outstanding-total').textContent='₹'+totalOutstanding.toLocaleString('en-IN');
+        document.getElementById('adv-prev-balance').textContent='₹'+advBalance.toLocaleString('en-IN');
+        document.getElementById('adv-new-this-month').textContent='₹'+newThisMonthTotal.toLocaleString('en-IN');
+        if(advInput&&!advInput.dataset.userEdited) advInput.value=totalOutstanding;
+      } else {
+        advPanel.style.display='none';
+        if(advInput) advInput.value=0;
+      }
+    }
+
+    const advRecover=Math.min(parseInt(advInput&&advInput.value)||0, totalOutstanding);
+    const netBeforeAdv=Math.max(0,cfg.base+otPay+incentive-absentD-lateD);
+    const advActual=Math.min(advRecover,netBeforeAdv);
+    const net=Math.max(0,netBeforeAdv-advActual);
+    const advCarryFwd=totalOutstanding-advActual;
+
+    const R=function(id,val){const el=document.getElementById(id);if(el)el.textContent=val;};
     R('pay-net-amount','₹'+net.toLocaleString('en-IN'));R('pb-net','₹'+net.toLocaleString('en-IN'));
     R('pb-base','₹'+cfg.base.toLocaleString('en-IN'));
-    R('pb-ot','+₹'+otPay.toLocaleString('en-IN'));R('pb-ot-lbl',`Overtime (${otH}h ${otM}m)`);
+    R('pb-ot','+₹'+otPay.toLocaleString('en-IN'));R('pb-ot-lbl','Overtime ('+otH+'h '+otM+'m)');
     R('pb-incentive','+₹'+incentive.toLocaleString('en-IN'));
-    R('pb-absent-lbl',`Absent (${absent} × ₹${Math.round(perDay)})`);R('pb-absent','−₹'+absentD.toLocaleString('en-IN'));
-    R('pb-late-lbl',`Late (${late}${cfg.lateRule==='fixed'?' × ₹'+cfg.lateAmount:''})`);R('pb-late','−₹'+lateD.toLocaleString('en-IN'));
-    R('pb-advance','−₹'+advRecover.toLocaleString('en-IN'));
-    document.getElementById('pay-att-stats').innerHTML=`
-      <div class="stat-box"><div class="stat-num" style="color:var(--green)">${present}</div><div class="stat-lbl">Present</div></div>
-      <div class="stat-box"><div class="stat-num" style="color:var(--red)">${absent}</div><div class="stat-lbl">Absent</div></div>
-      <div class="stat-box"><div class="stat-num" style="color:var(--accent)">${late}</div><div class="stat-lbl">Late</div></div>
-      <div class="stat-box"><div class="stat-num" style="color:var(--blue)">${offDays}</div><div class="stat-lbl">Paid Off</div></div>`;
-    document.getElementById('pay-ot-detail').textContent=otMins>0?`OT: ${otH}h ${otM}m · ₹${cfg.otRate}/hr · ₹${otPay}`:'No overtime';
+    R('pb-absent-lbl','Absent ('+absent+' × ₹'+Math.round(perDay)+')');R('pb-absent','−₹'+absentD.toLocaleString('en-IN'));
+    R('pb-late-lbl','Late ('+late+(cfg.lateRule==='fixed'?' × ₹'+cfg.lateAmount:'')+')');R('pb-late','−₹'+lateD.toLocaleString('en-IN'));
+    R('pb-advance','−₹'+advActual.toLocaleString('en-IN'));
+    if(advCarryFwd>0) R('pb-adv-carry','⚠️ ₹'+advCarryFwd.toLocaleString('en-IN')+' carries forward');
+    else R('pb-adv-carry','✓ Advance fully cleared');
+    document.getElementById('pay-att-stats').innerHTML=
+      '<div class="stat-box"><div class="stat-num" style="color:var(--green)">'+present+'</div><div class="stat-lbl">Present</div></div>'+
+      '<div class="stat-box"><div class="stat-num" style="color:var(--red)">'+absent+'</div><div class="stat-lbl">Absent</div></div>'+
+      '<div class="stat-box"><div class="stat-num" style="color:var(--accent)">'+late+'</div><div class="stat-lbl">Late</div></div>'+
+      '<div class="stat-box"><div class="stat-num" style="color:var(--blue)">'+offDays+'</div><div class="stat-lbl">Paid Off</div></div>';
+    document.getElementById('pay-ot-detail').textContent=otMins>0?'OT: '+otH+'h '+otM+'m · ₹'+cfg.otRate+'/hr · ₹'+otPay:'No overtime';
+    // Store computed values for markAsPaid
+    out.dataset.advActual=advActual;
+    out.dataset.advCarryFwd=advCarryFwd;
+    out.dataset.totalOutstanding=totalOutstanding;
+    out.dataset.newThisMonthIds=newThisMonth.map(function(a){return a.id;}).join(',');
     const payRec=await fbGet(p.payment(sid,mv)).catch(()=>null);
     const badge=document.getElementById('pay-status-badge');
-    if(badge)badge.innerHTML=payRec?`<span class="status-approved">✓ Paid ${payRec.date} via ${payRec.mode}</span>`:`<span class="status-pending">Unpaid</span>`;
+    if(badge)badge.innerHTML=payRec?'<span class="status-approved">✓ Paid '+payRec.date+' via '+payRec.mode+'</span>':'<span class="status-pending">Unpaid</span>';
   }catch(e){toast('Payroll error: '+e.message,true);}
   setLoading(false);
 };
@@ -1010,14 +1062,40 @@ window.renderPayroll=async function(){
 window.markAsPaid=async function(){
   const sid=v('pay-staff-sel'),mv=v('pay-month');
   if(!sid||!mv)return toast('Select staff and month',true);
+  const out=document.getElementById('payroll-output');
   const net=document.getElementById('pb-net').textContent;
   const mode=v('pay-mode'),note=v('pay-note');
-  const payRec={staffId:sid,staffName:staffArr.find(s=>s.id===sid)?.name,month:mv,net,mode,note,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()};
+  const advActual=parseInt(out.dataset.advActual)||0;
+  const advCarryFwd=parseInt(out.dataset.advCarryFwd)||0;
+  const totalOutstanding=parseInt(out.dataset.totalOutstanding)||0;
+  const newIds=(out.dataset.newThisMonthIds||'').split(',').filter(Boolean);
+  const staffName=staffArr.find(function(s){return s.id===sid;})&&staffArr.find(function(s){return s.id===sid;}).name;
+  const payRec={staffId:sid,staffName:staffName,month:mv,net,mode,note,advRecovered:advActual,advCarryFwd:advCarryFwd,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()};
+  setLoading(true,'Recording payment…');
   try{
+    // 1. Save payment record
     await fbSet(p.payment(sid,mv),payRec);
     await fbAdd(p.payHist(),payRec);
-    renderPayroll();renderPayHistory();toast('✓ Payment marked');
+    // 2. Update advance ledger balance (carry forward)
+    if(totalOutstanding>0){
+      await fbSet(p.advLedger(sid),{staffId:sid,staffName:staffName,balance:advCarryFwd,lastUpdated:new Date().toISOString(),lastMonth:mv});
+      // 3. Log this recovery in ledger log
+      await fbAdd(p.advLedgerLog(sid),{type:'recovery',month:mv,recovered:advActual,balanceBefore:totalOutstanding,balanceAfter:advCarryFwd,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()});
+      // 4. Mark new-this-month advances as counted in ledger
+      for(var i=0;i<newIds.length;i++){
+        try{await updateDoc(doc(db,p.advances()+'/'+newIds[i]),{countedInLedger:true});}catch(e){}
+      }
+    }
+    // 5. Reset advance input user-edited flag
+    const advInput=document.getElementById('pay-advance-recover');
+    if(advInput) delete advInput.dataset.userEdited;
+    await renderPayroll();
+    renderPayHistory();
+    renderAdvList();
+    populatePayrollDropdowns();
+    toast('✓ Payment marked · Advance ledger updated');
   }catch(e){toast('Error: '+e.message,true);}
+  setLoading(false);
 };
 
 async function renderPayHistory(){
@@ -1038,10 +1116,16 @@ window.giveAdvance=async function(){
   if(!sid)return toast('Select staff',true);
   if(!amount||amount<=0)return toast('Enter valid amount',true);
   if(!date)return toast('Select date',true);
+  const staffName=staffArr.find(function(s){return s.id===sid;})&&staffArr.find(function(s){return s.id===sid;}).name;
   try{
-    await fbAdd(p.advances(),{staffId:sid,staffName:staffArr.find(s=>s.id===sid)?.name,amount,date,note,recovered:false});
+    await fbAdd(p.advances(),{staffId:sid,staffName:staffName,amount,date,note,recovered:false,countedInLedger:false});
+    // Update ledger balance
+    const ledger=await fbGet(p.advLedger(sid)).catch(()=>null);
+    const prev=ledger&&ledger.balance>0?ledger.balance:0;
+    await fbSet(p.advLedger(sid),{staffId:sid,staffName:staffName,balance:prev+amount,lastUpdated:new Date().toISOString()});
+    await fbAdd(p.advLedgerLog(sid),{type:'given',amount,date,note:note||'',balanceBefore:prev,balanceAfter:prev+amount,ts:Date.now()});
     document.getElementById('adv-amount').value='';document.getElementById('adv-note').value='';
-    renderAdvList();toast('✓ Advance recorded');
+    renderAdvList();populatePayrollDropdowns();toast('✓ Advance recorded · Ledger updated');
   }catch(e){toast('Error: '+e.message,true);}
 };
 
@@ -1060,29 +1144,57 @@ window.giveQuickAdvance=async function(){
   const sid=v('qa-staff'),amount=parseInt(v('qa-amount')),date=v('qa-date'),note=v('qa-note');
   if(!sid)return toast('Select staff',true);
   if(!amount||amount<=0)return toast('Enter valid amount',true);
+  const staffName=staffArr.find(function(s){return s.id===sid;})&&staffArr.find(function(s){return s.id===sid;}).name;
   try{
-    await fbAdd(p.advances(),{staffId:sid,staffName:staffArr.find(s=>s.id===sid)?.name,amount,date,note,recovered:false});
-    closeSheet('sheet-quick-advance');toast('✓ Advance recorded for '+staffArr.find(s=>s.id===sid)?.name);
+    await fbAdd(p.advances(),{staffId:sid,staffName:staffName,amount,date,note,recovered:false,countedInLedger:false});
+    const ledger=await fbGet(p.advLedger(sid)).catch(()=>null);
+    const prev=ledger&&ledger.balance>0?ledger.balance:0;
+    await fbSet(p.advLedger(sid),{staffId:sid,staffName:staffName,balance:prev+amount,lastUpdated:new Date().toISOString()});
+    await fbAdd(p.advLedgerLog(sid),{type:'given',amount,date,note:note||'',balanceBefore:prev,balanceAfter:prev+amount,ts:Date.now()});
+    closeSheet('sheet-quick-advance');
+    populatePayrollDropdowns();
+    toast('✓ Advance recorded for '+staffName);
   }catch(e){toast('Error: '+e.message,true);}
 };
 
 async function renderAdvList(){
   const el=document.getElementById('adv-list');if(!el)return;
   try{
+    const active=staffArr.filter(function(s){return s.active;});
+    // Build ledger summary per staff
+    var summaryHtml='<div style="margin-bottom:14px;">';
+    var anyOutstanding=false;
+    for(var i=0;i<active.length;i++){
+      var s=active[i];
+      var ledger=await fbGet(p.advLedger(s.id)).catch(()=>null);
+      var bal=ledger&&ledger.balance>0?ledger.balance:0;
+      if(bal>0){
+        anyOutstanding=true;
+        summaryHtml+='<div class="row"><div class="row-main"><div class="row-title">'+s.name+'</div>'+
+          '<div class="row-sub">Outstanding advance</div></div>'+
+          '<span style="color:var(--accent);font-weight:700;font-size:14px;">₹'+bal.toLocaleString('en-IN')+'</span></div>';
+      }
+    }
+    if(!anyOutstanding) summaryHtml+='<div style="color:var(--green);font-size:13px;font-weight:600;">✓ No outstanding advances</div>';
+    summaryHtml+='</div><div class="divider"></div>';
+
+    // Full transaction log
     const advs=await fbList(p.advances(),orderBy('_createdAt','desc'));
-    if(!advs.length){el.innerHTML='<p style="color:var(--muted);font-size:13px">No advances</p>';return;}
-    const pending=advs.filter(a=>!a.recovered).reduce((s,a)=>s+a.amount,0);
-    el.innerHTML=`<div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:10px">Pending: ₹${pending.toLocaleString('en-IN')}</div>`+
-    advs.slice(0,15).map(a=>`
-      <div class="row"><div class="row-main"><div class="row-title">${a.staffName} · ₹${a.amount?.toLocaleString('en-IN')}</div><div class="row-sub">${a.date}${a.note?' · '+a.note:''}</div></div>
-      ${a.recovered?'<span class="status-approved">Recovered</span>':`<button class="btn btn-ghost btn-xs" onclick="markAdvRecovered('${a.id}')">Recovered</button>`}</div>`).join('');
-  }catch{el.innerHTML='<p style="color:var(--muted);font-size:13px">Error loading</p>';}
+    if(!advs.length){el.innerHTML=summaryHtml+'<p style="color:var(--muted);font-size:13px;margin-top:10px;">No advance transactions yet</p>';return;}
+    var logHtml='<div style="font-size:12px;font-weight:700;color:var(--muted);margin:12px 0 8px;">All Transactions</div>';
+    advs.slice(0,30).forEach(function(a){
+      var statusHtml=a.recovered||a.countedInLedger?
+        '<span class="status-approved">Settled</span>':
+        '<span style="color:var(--accent);font-size:12px;font-weight:600;">Pending</span>';
+      logHtml+='<div class="row"><div class="row-main">'+
+        '<div class="row-title">'+a.staffName+' · ₹'+a.amount.toLocaleString('en-IN')+'</div>'+
+        '<div class="row-sub">'+a.date+(a.note?' · '+a.note:'')+'</div></div>'+statusHtml+'</div>';
+    });
+    el.innerHTML=summaryHtml+logHtml;
+  }catch(e){el.innerHTML='<p style="color:var(--muted);font-size:13px">Error loading</p>';}
 }
 
-window.markAdvRecovered=async function(id){
-  try{await updateDoc(doc(db,p.advances()+'/'+id),{recovered:true});renderAdvList();toast('✓ Marked recovered');}
-  catch(e){toast('Error: '+e.message,true);}
-};
+// Advance recovery now handled automatically via ledger on markAsPaid
 
 // ─────────────────────────────────────────────
 //  STAFF MANAGEMENT
@@ -1401,7 +1513,8 @@ td.g{color:#22c55e;}td.re{color:#ef4444;}
 <tr><td>${g('pb-late-lbl')}</td><td class="r re">${g('pb-late')}</td></tr>
 <tr><td>Advance Recovered</td><td class="r re">${g('pb-advance')}</td></tr></table>
 <div class="net"><div class="nl">Net Payable</div><div class="nv">${g('pb-net')}</div></div>
-${payRec?`<div style="font-size:11px;color:#777;margin-bottom:8px">Paid: ${payRec.mode} · ${payRec.date}${payRec.note?' · '+payRec.note:''}</div>`:''}
+${payRec&&payRec.advCarryFwd>0?'<div style="font-size:12px;color:#f5a623;font-weight:600;margin-bottom:8px;">⚠️ Advance balance carried forward: ₹'+payRec.advCarryFwd.toLocaleString('en-IN')+'</div>':''}
+${payRec?'<div style="font-size:11px;color:#777;margin-bottom:8px">Paid: '+payRec.mode+' · '+payRec.date+(payRec.note?' · '+payRec.note:'')+'</div>':''}
 <div class="foot">AttendPro · ${new Date().toLocaleDateString('en-IN')}</div>
 </div></body></html>`);
     w.document.close();
@@ -2143,7 +2256,20 @@ textarea.form-input{resize:none;}
         <div class="card">
           <div class="card-title">Adjustments</div>
           <div class="form-group"><label class="form-label">Sales Incentive (₹)</label><input type="number" class="form-input" id="pay-incentive-inp" placeholder="0" min="0" oninput="renderPayroll()"></div>
-          <div class="form-group"><label class="form-label">Advance to Recover This Month (₹)</label><input type="number" class="form-input" id="pay-advance-recover" placeholder="0" min="0" oninput="renderPayroll()"></div>
+          <!-- Advance Panel — shown only when outstanding exists -->
+          <div id="pay-advance-panel" style="display:none;background:var(--card2,rgba(255,165,0,0.08));border:1.5px solid var(--accent);border-radius:12px;padding:14px;margin-bottom:14px;">
+            <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:10px;">⚠️ Advance Outstanding</div>
+            <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:4px;">
+              <span>Previous balance</span><span id="adv-prev-balance">₹0</span></div>
+            <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:8px;">
+              <span>New this month</span><span id="adv-new-this-month">₹0</span></div>
+            <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;margin-bottom:12px;padding-top:8px;border-top:1px solid rgba(255,165,0,0.3);">
+              <span>Total Outstanding</span><span id="adv-outstanding-total" style="color:var(--accent);">₹0</span></div>
+            <div class="form-group" style="margin-bottom:6px;"><label class="form-label">Recover this month (₹)</label>
+              <input type="number" class="form-input" id="pay-advance-recover" placeholder="0" min="0"
+                oninput="this.dataset.userEdited='1';renderPayroll()"></div>
+            <div style="font-size:12px;font-weight:600;margin-top:6px;" id="pb-adv-carry"></div>
+          </div>
         </div>
         <div class="card">
           <div class="card-title">Attendance This Month</div>
