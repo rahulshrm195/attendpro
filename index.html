@@ -806,6 +806,11 @@ window.renderReport=async function(){
     const marksAll=await fbList(p.days());
     const marks={};marksAll.filter(m=>m.date?.startsWith(prefix)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
     drawCal('report-cal',d.getFullYear(),d.getMonth(),sid==='all'?null:sid,recs,marks);
+    const calLabel=document.getElementById('report-cal-label');
+    if(calLabel){
+      if(sid==='all') calLabel.textContent='Showing: All Staff combined (green = at least 1 staff present)';
+      else calLabel.textContent='Showing: '+(staffArr.find(function(s){return s.id===sid;})||{}).name||sid;
+    }
     if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks);
     else document.getElementById('report-stats').innerHTML='';
     const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,30);
@@ -2205,6 +2210,7 @@ textarea.form-input{resize:none;}
       </div>
       <div class="card">
         <div class="month-nav"><button onclick="changeReportMonth(-1)">‹</button><span id="report-month-lbl"></span><button onclick="changeReportMonth(1)">›</button></div>
+        <div style="font-size:12px;color:var(--muted);text-align:center;margin-bottom:8px;" id="report-cal-label">All Staff</div>
         <div class="cal-grid" id="report-cal"></div>
       </div>
       <div class="stat-grid" id="report-stats"></div>
