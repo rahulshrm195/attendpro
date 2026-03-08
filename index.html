@@ -809,7 +809,7 @@ window.renderReport=async function(){
     const calLabel=document.getElementById('report-cal-label');
     if(calLabel){
       if(sid==='all') calLabel.textContent='Showing: All Staff combined (green = at least 1 staff present)';
-      else calLabel.textContent='Showing: '+(staffArr.find(function(s){return s.id===sid;})||{}).name||sid;
+      else{var sf=staffArr.find(function(s){return s.id===sid;});calLabel.textContent='Showing: '+(sf?sf.name:sid);}
     }
     if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks);
     else document.getElementById('report-stats').innerHTML='';
