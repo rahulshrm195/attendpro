@@ -106,7 +106,7 @@ const p = {
   advances:  ()=>`businesses/${BIZ_ID}/advances`,
   advDoc:    (id)=>`businesses/${BIZ_ID}/advances/${id}`,
   advLedger: (sid)=>`businesses/${BIZ_ID}/advance_ledger/${sid}`,
-  advLedgerLog: (sid)=>`businesses/${BIZ_ID}/advance_ledger_log/${sid}`,
+  advLedgerLog: ()=>`businesses/${BIZ_ID}/advance_ledger_log`,
   salary:    (sid)=>`businesses/${BIZ_ID}/salary_config/${sid}`,
   payment:   (sid,month)=>`businesses/${BIZ_ID}/payments/${sid}_${month}`,
   payHist:   ()=>`businesses/${BIZ_ID}/payment_history`,
@@ -1085,7 +1085,7 @@ window.markAsPaid=async function(){
     if(totalOutstanding>0){
       await fbSet(p.advLedger(sid),{staffId:sid,staffName:staffName,balance:advCarryFwd,lastUpdated:new Date().toISOString(),lastMonth:mv});
       // 3. Log this recovery in ledger log
-      await fbAdd(p.advLedgerLog(sid),{type:'recovery',month:mv,recovered:advActual,balanceBefore:totalOutstanding,balanceAfter:advCarryFwd,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()});
+      await fbAdd(p.advLedgerLog(),{type:'recovery',month:mv,recovered:advActual,balanceBefore:totalOutstanding,balanceAfter:advCarryFwd,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()});
       // 4. Mark new-this-month advances as counted in ledger
       for(var i=0;i<newIds.length;i++){
         try{await updateDoc(doc(db,p.advances()+'/'+newIds[i]),{countedInLedger:true});}catch(e){}
@@ -1128,7 +1128,7 @@ window.giveAdvance=async function(){
     const ledger=await fbGet(p.advLedger(sid)).catch(()=>null);
     const prev=ledger&&ledger.balance>0?ledger.balance:0;
     await fbSet(p.advLedger(sid),{staffId:sid,staffName:staffName,balance:prev+amount,lastUpdated:new Date().toISOString()});
-    await fbAdd(p.advLedgerLog(sid),{type:'given',amount,date,note:note||'',balanceBefore:prev,balanceAfter:prev+amount,ts:Date.now()});
+    await fbAdd(p.advLedgerLog(),{type:'given',amount,date,note:note||'',balanceBefore:prev,balanceAfter:prev+amount,ts:Date.now()});
     document.getElementById('adv-amount').value='';document.getElementById('adv-note').value='';
     renderAdvList();populatePayrollDropdowns();toast('✓ Advance recorded · Ledger updated');
   }catch(e){toast('Error: '+e.message,true);}
@@ -1155,7 +1155,7 @@ window.giveQuickAdvance=async function(){
     const ledger=await fbGet(p.advLedger(sid)).catch(()=>null);
     const prev=ledger&&ledger.balance>0?ledger.balance:0;
     await fbSet(p.advLedger(sid),{staffId:sid,staffName:staffName,balance:prev+amount,lastUpdated:new Date().toISOString()});
-    await fbAdd(p.advLedgerLog(sid),{type:'given',amount,date,note:note||'',balanceBefore:prev,balanceAfter:prev+amount,ts:Date.now()});
+    await fbAdd(p.advLedgerLog(),{type:'given',amount,date,note:note||'',balanceBefore:prev,balanceAfter:prev+amount,ts:Date.now()});
     closeSheet('sheet-quick-advance');
     populatePayrollDropdowns();
     toast('✓ Advance recorded for '+staffName);
@@ -1188,9 +1188,11 @@ async function renderAdvList(){
     if(!advs.length){el.innerHTML=summaryHtml+'<p style="color:var(--muted);font-size:13px;margin-top:10px;">No advance transactions yet</p>';return;}
     var logHtml='<div style="font-size:12px;font-weight:700;color:var(--muted);margin:12px 0 8px;">All Transactions</div>';
     advs.slice(0,30).forEach(function(a){
-      var statusHtml=a.recovered||a.countedInLedger?
+      var settled=a.recovered||a.countedInLedger;
+      var statusHtml=settled?
         '<span class="status-approved">Settled</span>':
-        '<span style="color:var(--accent);font-size:12px;font-weight:600;">Pending</span>';
+        '<div style="display:flex;align-items:center;gap:6px;"><span style="color:var(--accent);font-size:12px;font-weight:600;">Pending</span>'+
+        '<button class="btn btn-ghost btn-xs" style="color:var(--danger);border-color:var(--danger);padding:3px 8px;font-size:11px;" onclick="deleteAdvance(\''+a.id+'\',\''+a.staffId+'\','+a.amount+')">🗑️</button></div>';
       logHtml+='<div class="row"><div class="row-main">'+
         '<div class="row-title">'+a.staffName+' · ₹'+a.amount.toLocaleString('en-IN')+'</div>'+
         '<div class="row-sub">'+a.date+(a.note?' · '+a.note:'')+'</div></div>'+statusHtml+'</div>';
@@ -1200,6 +1202,22 @@ async function renderAdvList(){
 }
 
 // Advance recovery now handled automatically via ledger on markAsPaid
+
+window.deleteAdvance=async function(id,staffId,amount){
+  if(!confirm('Delete this advance of ₹'+amount+'? This will also reduce the ledger balance.'))return;
+  try{
+    await fbDel(p.advances()+'/'+id);
+    // Correct ledger balance
+    const ledger=await fbGet(p.advLedger(staffId)).catch(()=>null);
+    if(ledger){
+      const newBal=Math.max(0,(ledger.balance||0)-amount);
+      await fbSet(p.advLedger(staffId),{balance:newBal,lastUpdated:new Date().toISOString()});
+    }
+    renderAdvList();
+    populatePayrollDropdowns();
+    toast('✓ Advance deleted · Ledger updated');
+  }catch(e){toast('Error: '+e.message,true);}
+};
 
 // ─────────────────────────────────────────────
 //  STAFF MANAGEMENT
@@ -1949,7 +1967,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.9.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.11.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -2577,7 +2595,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.9.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.11.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2585,20 +2603,34 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.9.0 -->
+    <!-- v1.11.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.9.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.11.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Settings cards bleeding into all tabs (broken div structure)</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>ISO timestamps on every punch — exact hours &amp; minutes worked calculated</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Hours worked shown on punch-out success screen and Today view</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Real-time inbox badge — updates live via Firestore listener</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Export attendance to CSV — all records with hours, GPS flags</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Print / PDF attendance report with summary</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Staff management — rename, delete staff, avatar initials</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Advance ledger Firebase path error (odd segments)</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Delete advance — 🗑️ button on pending advances, auto-corrects ledger balance</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Reports calendar label not updating on staff filter change</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>No Weekly Off option — for staff working all 7 days</span></div>
+      </div>
+    </div>
+    <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
+    <!-- v1.10.0 -->
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--text);">v1.10.0</span>
+        <span style="font-size:11px;color:var(--muted);">Advance Ledger + Split Shifts</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Split shift support — multiple punch in/out per day, total hours summed</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Advance ledger — running balance per staff with carry forward</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Payroll shows outstanding advance with breakdown — you decide recovery amount</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Mark as Paid auto-settles advance and carries balance to next month</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Staff dropdown shows ⚠️ advance outstanding badge</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Static printable QR code (GPS + selfie handles verification)</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Company code onboarding — staff join by entering store code once</span></div>
       </div>
     </div>
     <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
