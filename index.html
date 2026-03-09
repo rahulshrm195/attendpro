@@ -568,8 +568,10 @@ async function renderMyHistory(){
     const recs={}; all.filter(r=>r.date?.startsWith(prefix)).forEach(r=>recs[r.id]=r);
     const marksAll=await fbList(p.days());
     const marks={}; marksAll.filter(m=>m.date?.startsWith(prefix)&&(!m.staffId||m.staffId===currentStaff.id)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
-    drawCal('my-cal',d.getFullYear(),d.getMonth(),currentStaff.id,recs,marks);
-    drawStats('my-stats',currentStaff.id,d.getFullYear(),d.getMonth(),recs,marks);
+    var myCfg=await getSalaryCfg(currentStaff.id);
+    var myWeeklyOff=myCfg.weeklyOff>=0?myCfg.weeklyOff:-1;
+    drawCal('my-cal',d.getFullYear(),d.getMonth(),currentStaff.id,recs,marks,myWeeklyOff);
+    drawStats('my-stats',currentStaff.id,d.getFullYear(),d.getMonth(),recs,marks,myWeeklyOff);
     const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,20);
     if(!list.length){
       document.getElementById('my-log').innerHTML='<div class="empty-state"><div class="emoji">📅</div>No records</div>';
@@ -672,7 +674,14 @@ async function renderOwnerToday(){
     const recs={}; allRecs.forEach(r=>recs[r.staffId+'_'+r.date]=r);
     const [lh,lm]=settings.punchInTime.split(':').map(Number);
     const now=new Date(),pastLimit=now.getHours()>lh||(now.getHours()===lh&&now.getMinutes()>lm);
+    const todayDow=now.getDay();
     const active=staffArr.filter(s=>s.active);
+    // Fetch salary configs for weekly off check
+    const cfgMap={};
+    for(var ci=0;ci<active.length;ci++){
+      var sc=await getSalaryCfg(active[ci].id);
+      cfgMap[active[ci].id]=sc;
+    }
     let html='<div class="card"><div class="card-title">Today — '+today+'</div>';
     if(!active.length)html+='<p style="font-size:13px;color:var(--muted)">No staff yet. Go to Staff tab.</p>';
     active.forEach(function(s){
@@ -680,8 +689,11 @@ async function renderOwnerToday(){
       const sessions=rec&&rec.sessions&&rec.sessions.length?rec.sessions:null;
       const last=sessions?sessions[sessions.length-1]:null;
       const hasOpen=last&&!last.outTime;
+      const scfg=cfgMap[s.id]||{weeklyOff:-1};
+      const isWeeklyOff=scfg.weeklyOff>=0&&todayDow===scfg.weeklyOff;
       let status='<span class="chip chip-red">Not In</span>';
-      if(sessions&&!hasOpen) status='<span class="chip chip-blue">Done</span>';
+      if(isWeeklyOff&&!sessions) status='<span class="chip" style="background:rgba(148,163,184,.15);color:var(--muted);">🏖️ Weekly Off</span>';
+      else if(sessions&&!hasOpen) status='<span class="chip chip-blue">Done</span>';
       else if(hasOpen) status='<span class="chip chip-green">In</span>';
       const sub=sessions&&sessions.length>1?
         sessions.map(function(ss,i){return 'S'+(i+1)+': '+(ss.inTime||'—')+' → '+(ss.outTime||'…');}).join(' | '):
@@ -697,7 +709,7 @@ async function renderOwnerToday(){
     });
     const late=active.filter(s=>recs[s.id+'_'+today]?.late).map(s=>s.name);
     if(late.length)html+=`<div class="divider"></div><div style="color:var(--accent2);font-size:12px;font-weight:700">⚠️ Late: ${late.join(', ')}</div>`;
-    const notIn=active.filter(s=>!recs[s.id+'_'+today]).map(s=>s.name);
+    const notIn=active.filter(s=>!recs[s.id+'_'+today]&&!(cfgMap[s.id]&&cfgMap[s.id].weeklyOff>=0&&cfgMap[s.id].weeklyOff===todayDow)).map(s=>s.name);
     if(notIn.length&&pastLimit)html+=`<div style="color:var(--red);font-size:12px;font-weight:700;margin-top:6px">❌ Not in: ${notIn.join(', ')}</div>`;
     html+=`</div>`;
     document.getElementById('owner-today-content').innerHTML=html;
@@ -918,13 +930,15 @@ window.renderReport=async function(){
     const recs={};recsAll.forEach(r=>recs[r.staffId+'_'+r.date]=r);
     const marksAll=await fbList(p.days());
     const marks={};marksAll.filter(m=>m.date?.startsWith(prefix)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
-    drawCal('report-cal',d.getFullYear(),d.getMonth(),sid==='all'?null:sid,recs,marks);
+    var weeklyOff=-1;
+    if(sid!=='all'){var cfg=await getSalaryCfg(sid);weeklyOff=cfg.weeklyOff>=0?cfg.weeklyOff:-1;}
+    drawCal('report-cal',d.getFullYear(),d.getMonth(),sid==='all'?null:sid,recs,marks,weeklyOff);
     const calLabel=document.getElementById('report-cal-label');
     if(calLabel){
       if(sid==='all') calLabel.textContent='Showing: All Staff combined (green = at least 1 staff present)';
       else{var sf=staffArr.find(function(s){return s.id===sid;});calLabel.textContent='Showing: '+(sf?sf.name:sid);}
     }
-    if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks);
+    if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks,weeklyOff);
     else document.getElementById('report-stats').innerHTML='';
     const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,30);
     if(!list.length){
@@ -1674,7 +1688,7 @@ document.querySelectorAll('.sheet-overlay').forEach(el=>{
 // ─────────────────────────────────────────────
 //  CALENDAR / STATS HELPERS
 // ─────────────────────────────────────────────
-function drawCal(cid,year,month,sid,recs,marks){
+function drawCal(cid,year,month,sid,recs,marks,weeklyOff){
   const c=document.getElementById(cid);
   let html=['Su','Mo','Tu','We','Th','Fr','Sa'].map(h=>`<div class="cal-head">${h}</div>`).join('');
   const first=new Date(year,month,1).getDay();
@@ -1682,6 +1696,8 @@ function drawCal(cid,year,month,sid,recs,marks){
   const dim=new Date(year,month+1,0).getDate(),today=todayStr();
   for(let d=1;d<=dim;d++){
     const ds=`${year}-${pad(month+1)}-${pad(d)}`;
+    const dow=new Date(year,month,d).getDay();
+    const isWeeklyOff=weeklyOff>=0&&dow===weeklyOff;
     const mark=marks[ds]||(sid?marks[ds+'_'+sid]:null);
     const rec=sid?recs[`${sid}_${ds}`]:Object.values(recs).find(r=>r.date===ds);
     let cls='cal-day';
@@ -1689,19 +1705,23 @@ function drawCal(cid,year,month,sid,recs,marks){
     if(mark?.type==='holiday')cls+=' holiday';
     else if(mark?.type==='leave')cls+=mark.leaveType==='half'?' halfday':' leave';
     else if(rec?.inTime){cls+=' present';if(rec.late)cls+=' late';}
+    else if(isWeeklyOff)cls+=' weekly-off';
     else if(ds<today)cls+=' absent';
-    html+=`<div class="${cls}">${d}</div>`;
+    html+=`<div class="${cls}"${isWeeklyOff&&!rec?' title="Weekly Off"':''}>${d}</div>`;
   }
   c.innerHTML=html;
 }
-function drawStats(cid,sid,year,month,recs,marks){
+function drawStats(cid,sid,year,month,recs,marks,weeklyOff){
+  weeklyOff=weeklyOff>=0?weeklyOff:-1;
   const dim=new Date(year,month+1,0).getDate(),now=new Date();
   const upto=(year===now.getFullYear()&&month===now.getMonth())?now.getDate():dim;
   let present=0,late=0,absent=0,off=0;
   for(let i=1;i<=upto;i++){
     const ds=`${year}-${pad(month+1)}-${pad(i)}`;
+    const dow=new Date(year,month,i).getDay();
     const mark=marks[ds]||(sid?marks[ds+'_'+sid]:null);
     if(mark){off++;continue;}
+    if(weeklyOff>=0&&dow===weeklyOff){off++;continue;}
     const rec=recs[`${sid}_${ds}`];
     if(rec?.inTime){present++;if(rec.late)late++;}else absent++;
   }
@@ -2001,6 +2021,7 @@ textarea.form-input{resize:none;}
 .cal-day{aspect-ratio:1;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;position:relative;}
 .cal-day.present{background:rgba(34,197,94,.2);color:var(--green);font-weight:700;}
 .cal-day.absent{background:rgba(239,68,68,.1);color:var(--red);}
+.cal-day.weekly-off{background:rgba(148,163,184,.12);color:var(--muted);}
 .cal-day.holiday{background:rgba(59,130,246,.15);color:var(--blue);}
 .cal-day.leave{background:rgba(245,166,35,.15);color:var(--accent);}
 .cal-day.halfday{background:rgba(139,92,246,.15);color:var(--purple);}
@@ -2078,7 +2099,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.12.1</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.12.2</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -2730,7 +2751,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.12.1</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.12.2</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2738,10 +2759,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.12.1 -->
+    <!-- v1.12.2 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.12.1</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.12.2</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
