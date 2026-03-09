@@ -692,7 +692,7 @@ async function renderOwnerToday(){
       html+='<div class="row"><div class="row-main"><div class="row-title">'+s.name+
         (rec&&rec.late?' <span class="late-tag">LATE</span>':'')+(rec&&rec.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':'')+
         '</div><div class="row-sub">'+sub+worked+dist+'</div></div>'+
-        (hasOpen?'<button class="btn btn-ghost btn-xs" style="color:var(--accent2);border-color:var(--accent2);font-size:11px;padding:4px 8px;margin-right:6px;" onclick="fixPunchOut(\''+s.id+'\',\''+today+'\')">Fix Out</button>':'')+
+        (rec?'<button class="btn btn-ghost btn-xs" style="color:var(--accent2);border-color:var(--accent2);font-size:11px;padding:4px 8px;margin-right:6px;" onclick="openEditPunch(\''+s.id+'\',\''+today+'\')">✏️ Edit</button>':'')+
         status+thumbHTML(selfie,s.name,rec?rec.inTime:null)+'</div>';
     });
     const late=active.filter(s=>recs[s.id+'_'+today]?.late).map(s=>s.name);
@@ -706,52 +706,106 @@ async function renderOwnerToday(){
 }
 
 // ─────────────────────────────────────────────
-//  FIX PUNCH OUT (manual correction by owner)
+//  EDIT PUNCH (owner manual correction)
 // ─────────────────────────────────────────────
-window.fixPunchOut=async function(staffId,date){
+window.openEditPunch=async function(staffId,date){
   var staffName=staffArr.find(function(s){return s.id===staffId;});
   staffName=staffName?staffName.name:staffId;
-  // Default to current time
-  var now=new Date();
-  var hh=String(now.getHours()).padStart(2,'0');
-  var mm=String(now.getMinutes()).padStart(2,'0');
-  var defaultTime=hh+':'+mm;
-  var input=prompt('Set punch-out time for '+staffName+' on '+date+'\nFormat: HH:MM (24hr)',defaultTime);
-  if(!input)return;
-  var parts=input.trim().split(':');
-  if(parts.length!==2||isNaN(parts[0])||isNaN(parts[1]))return toast('Invalid time format. Use HH:MM',true);
-  var h=parseInt(parts[0]),m=parseInt(parts[1]);
-  if(h<0||h>23||m<0||m>59)return toast('Invalid time',true);
-  setLoading(true,'Updating punch-out…');
+  setLoading(true,'Loading record…');
   try{
     var rec=await fbGet(p.rec(staffId,date)).catch(function(){return null;});
-    if(!rec)return toast('No attendance record found for this date',true);
-    var outISO=new Date(date+'T'+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':00').toISOString();
-    var fmt=function(hh,mm){var ampm=hh>=12?'PM':'AM';var h12=hh%12||12;return h12+':'+(mm<10?'0':'')+mm+' '+ampm;};
-    var outTime=fmt(h,m);
-    var sessions=rec.sessions&&rec.sessions.length?rec.sessions.slice():[];
-    if(sessions.length>0){
-      // Close the last open session
+    if(!rec){toast('No attendance record found',true);setLoading(false);return;}
+    var sessions=rec.sessions&&rec.sessions.length?rec.sessions:null;
+    var inTime='',outTime='';
+    if(sessions&&sessions.length>0){
       var last=sessions[sessions.length-1];
-      if(!last.outTime){
-        var inISO=last.inISO||new Date(date+'T00:00:00').toISOString();
-        var workedMins=Math.round((new Date(outISO)-new Date(inISO))/60000);
-        var wh=Math.floor(workedMins/60),wm=workedMins%60;
-        sessions[sessions.length-1]=Object.assign({},last,{outTime:outTime,outISO:outISO,workedMins:workedMins,workedDisplay:wh+'h '+wm+'m'});
-        var totalMins=sessions.reduce(function(s,ss){return s+(ss.workedMins||0);},0);
-        var th=Math.floor(totalMins/60),tm=totalMins%60;
-        await updateDoc(doc(db,p.rec(staffId,date)),{sessions:sessions,outTime:outTime,workedMins:totalMins,workedDisplay:th+'h '+tm+'m',manualOut:true,_updatedAt:serverTimestamp()});
-      } else {
-        toast('Last session already has a punch-out',true);setLoading(false);return;
-      }
+      // Convert 12hr to 24hr for time input
+      inTime=to24hr(last.inTime||'');
+      outTime=last.outTime?to24hr(last.outTime):'';
     } else {
-      // Legacy record without sessions
-      var inISO2=rec.inISO||new Date(date+'T09:00:00').toISOString();
-      var worked2=Math.round((new Date(outISO)-new Date(inISO2))/60000);
-      var wh2=Math.floor(worked2/60),wm2=worked2%60;
-      await updateDoc(doc(db,p.rec(staffId,date)),{outTime:outTime,outISO:outISO,workedMins:worked2,workedDisplay:wh2+'h '+wm2+'m',manualOut:true,_updatedAt:serverTimestamp()});
+      inTime=to24hr(rec.inTime||'');
+      outTime=rec.outTime?to24hr(rec.outTime):'';
     }
-    toast('✓ Punch-out set to '+outTime+' for '+staffName);
+    document.getElementById('edit-punch-staffid').value=staffId;
+    document.getElementById('edit-punch-date').value=date;
+    document.getElementById('edit-punch-sub').textContent=staffName+' · '+date;
+    document.getElementById('edit-punch-in').value=inTime;
+    document.getElementById('edit-punch-out').value=outTime;
+    openSheet('sheet-edit-punch');
+  }catch(e){toast('Error: '+e.message,true);}
+  setLoading(false);
+};
+
+function to24hr(timeStr){
+  if(!timeStr)return '';
+  // Already 24hr format HH:MM
+  if(/^\d{1,2}:\d{2}$/.test(timeStr)&&!/(AM|PM)/i.test(timeStr)){
+    var p2=timeStr.split(':');return String(parseInt(p2[0])).padStart(2,'0')+':'+p2[1];
+  }
+  // 12hr format
+  var m=timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if(!m)return '';
+  var h=parseInt(m[1]),mn=parseInt(m[2]),ampm=m[3].toUpperCase();
+  if(ampm==='AM'&&h===12)h=0;
+  if(ampm==='PM'&&h!==12)h+=12;
+  return String(h).padStart(2,'0')+':'+String(mn).padStart(2,'0');
+}
+
+window.saveEditPunch=async function(){
+  var staffId=document.getElementById('edit-punch-staffid').value;
+  var date=document.getElementById('edit-punch-date').value;
+  var inVal=document.getElementById('edit-punch-in').value;
+  var outVal=document.getElementById('edit-punch-out').value;
+  if(!inVal)return toast('Punch-in time is required',true);
+  var fmt12=function(t){var p2=t.split(':'),h=parseInt(p2[0]),m=parseInt(p2[1]);var ampm=h>=12?'PM':'AM';var h12=h%12||12;return h12+':'+(m<10?'0':'')+m+' '+ampm;};
+  var inTime12=fmt12(inVal);
+  var outTime12=outVal?fmt12(outVal):'';
+  var inISO=new Date(date+'T'+inVal+':00').toISOString();
+  var outISO=outVal?new Date(date+'T'+outVal+':00').toISOString():'';
+  var workedMins=0,workedDisplay='';
+  if(outVal){
+    workedMins=Math.round((new Date(outISO)-new Date(inISO))/60000);
+    if(workedMins<0){toast('Punch-out must be after punch-in',true);return;}
+    var wh=Math.floor(workedMins/60),wm=workedMins%60;
+    workedDisplay=wh+'h '+wm+'m';
+  }
+  setLoading(true,'Saving…');
+  try{
+    var rec=await fbGet(p.rec(staffId,date)).catch(function(){return null;});
+    if(!rec){toast('No attendance record found',true);setLoading(false);return;}
+    var staffName=staffArr.find(function(s){return s.id===staffId;});
+    staffName=staffName?staffName.name:staffId;
+    var sessions=rec.sessions&&rec.sessions.length?rec.sessions.slice():null;
+    if(sessions&&sessions.length>0){
+      // Edit last session
+      var last=sessions[sessions.length-1];
+      sessions[sessions.length-1]=Object.assign({},last,{
+        inTime:inTime12,inISO:inISO,
+        outTime:outTime12,outISO:outISO,
+        workedMins:workedMins,workedDisplay:workedDisplay
+      });
+      var totalMins=sessions.reduce(function(s,ss){return s+(ss.workedMins||0);},0);
+      var th=Math.floor(totalMins/60),tm=totalMins%60;
+      await updateDoc(doc(db,p.rec(staffId,date)),{
+        sessions:sessions,
+        inTime:sessions[0].inTime,
+        outTime:outTime12,
+        workedMins:totalMins,
+        workedDisplay:th+'h '+tm+'m',
+        manualEdit:true,
+        _updatedAt:serverTimestamp()
+      });
+    } else {
+      await updateDoc(doc(db,p.rec(staffId,date)),{
+        inTime:inTime12,inISO:inISO,
+        outTime:outTime12,outISO:outISO,
+        workedMins:workedMins,workedDisplay:workedDisplay,
+        manualEdit:true,
+        _updatedAt:serverTimestamp()
+      });
+    }
+    closeSheet('sheet-edit-punch');
+    toast('✓ Attendance updated for '+staffName);
     renderOwnerToday();
     renderReport();
   }catch(e){toast('Error: '+e.message,true);}
@@ -890,10 +944,10 @@ window.renderReport=async function(){
         var hasOpenSession=sessions?sessions.some(function(ss){return !ss.outTime;}):!r.outTime;
         rhtml+='<div class="row"><div class="row-main"><div class="row-title">'+r.staffName+
           (r.late?' <span class="late-tag">LATE</span>':'')+(r.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':'')+
-          (r.manualOut?' <span style="font-size:10px;color:var(--muted)">(edited)</span>':'')+
+          (r.manualEdit?' <span style="font-size:10px;color:var(--muted)">(edited)</span>':'')+
           (r.manual?' <span style="font-size:10px;color:var(--muted)">(manual)</span>':'')+
           '</div><div class="row-sub">'+r.date+' · '+sub+'</div></div>'+
-          (hasOpenSession?'<button class="btn btn-ghost btn-xs" style="color:var(--accent2);border-color:var(--accent2);font-size:11px;padding:4px 8px;" onclick="fixPunchOut(\''+r.staffId+'\',\''+r.date+'\')">Fix Out</button>':'')+
+          '<button class="btn btn-ghost btn-xs" style="color:var(--accent2);border-color:var(--accent2);font-size:11px;padding:4px 8px;" onclick="openEditPunch(\''+r.staffId+'\',\''+r.date+'\')">✏️ Edit</button>'+
           thumbHTML(selfie,r.staffName,inT)+'</div>';
       }
       document.getElementById('report-log').innerHTML=rhtml;
@@ -2024,7 +2078,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.12.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.12.1</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -2526,6 +2580,34 @@ textarea.form-input{resize:none;}
 </div>
 
 <!-- ══ SHEET: Quick Give Advance (owner Today page) ══ -->
+<!-- ══ SHEET: Edit Punch ══ -->
+<div class="sheet-overlay" id="sheet-edit-punch">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Edit Attendance</div>
+    <div class="sheet-sub" id="edit-punch-sub">Editing punch for staff</div>
+    <input type="hidden" id="edit-punch-staffid">
+    <input type="hidden" id="edit-punch-date">
+    <input type="hidden" id="edit-punch-session">
+    <div class="two-col">
+      <div class="form-group">
+        <label class="form-label">Punch In Time</label>
+        <input type="time" class="form-input" id="edit-punch-in">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Punch Out Time</label>
+        <input type="time" class="form-input" id="edit-punch-out" placeholder="Leave blank if still in">
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Leave punch-out blank if staff is still in.</div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="saveEditPunch()">✓ Save Changes</button>
+      <button class="btn btn-secondary" onclick="closeSheet('sheet-edit-punch')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SHEET: Quick Advance ══ -->
 <div class="sheet-overlay" id="sheet-quick-advance">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -2648,7 +2730,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.12.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.12.1</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2656,10 +2738,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.12.0 -->
+    <!-- v1.12.1 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.12.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.12.1</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
