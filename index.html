@@ -1114,20 +1114,36 @@ window.renderPayroll=async function(){
     const dim=new Date(year,month+1,0).getDate();
     const now=new Date(),isCur=(year===now.getFullYear()&&month===now.getMonth());
     const upto=isCur?now.getDate():dim;
-    var workDays=0,present=0,absent=0,late=0,offDays=0,otMins=0;
+    const [startH,startM]=cfg.startTime.split(':').map(Number);
     const [endH,endM]=cfg.endTime.split(':').map(Number);
+    const standardMins=(endH*60+endM)-(startH*60+startM);
+    var workDays=0,present=0,absent=0,late=0,offDays=0,otMins=0,weeklyOffMins=0,weeklyOffWorked=0;
     for(var i=1;i<=upto;i++){
       const ds=year+'-'+pad(month+1)+'-'+pad(i);
       const dow=new Date(year,month,i).getDay();
       const mark=marks[ds]||(marks[ds+'_'+sid]);
-      if((cfg.weeklyOff>=0&&dow==cfg.weeklyOff)||mark&&(mark.type==='holiday'||mark.type==='leave')){offDays++;continue;}
-      workDays++;
       const rec=recs[sid+'_'+ds];
+      // Check if this is weekly off day
+      if(cfg.weeklyOff>=0&&dow==cfg.weeklyOff){
+        offDays++;
+        if(rec&&rec.inTime){
+          weeklyOffWorked++;
+          // Add worked mins for this weekly off day
+          if(rec.workedMins) weeklyOffMins+=rec.workedMins;
+          else if(rec.outTime){const[oh,om]=parseTime12(rec.outTime);const[ih,im]=parseTime12(rec.inTime);weeklyOffMins+=Math.max(0,(oh*60+om)-(ih*60+im));}
+          else weeklyOffMins+=standardMins; // no out time — assume full shift
+        }
+        continue;
+      }
+      if(mark&&(mark.type==='holiday'||mark.type==='leave')){offDays++;continue;}
+      workDays++;
       if(rec&&rec.inTime){present++;if(rec.late)late++;
         if(rec.outTime){const[oh,om]=parseTime12(rec.outTime);const diff=(oh*60+om)-(endH*60+endM);if(diff>0)otMins+=diff;}
       }else absent++;
     }
-    const perDay=workDays>0?cfg.base/workDays:0;
+    const perDay=Math.round(cfg.base/30);
+    // Prorate weekly off bonus based on actual hours worked vs standard shift
+    const weeklyOffBonus=standardMins>0?Math.round((weeklyOffMins/standardMins)*perDay*weeklyOffWorked):0;
     const absentD=Math.round(absent*perDay);
     var lateD=0;
     if(cfg.lateRule==='fixed')lateD=late*(cfg.lateAmount||0);
@@ -1155,7 +1171,7 @@ window.renderPayroll=async function(){
     }
 
     const advRecover=Math.min(parseInt(advInput&&advInput.value)||0, totalOutstanding);
-    const netBeforeAdv=Math.max(0,cfg.base+otPay+incentive-absentD-lateD);
+    const netBeforeAdv=Math.max(0,cfg.base+otPay+incentive+weeklyOffBonus-absentD-lateD);
     const advActual=Math.min(advRecover,netBeforeAdv);
     const net=Math.max(0,netBeforeAdv-advActual);
     const advCarryFwd=totalOutstanding-advActual;
@@ -1165,7 +1181,12 @@ window.renderPayroll=async function(){
     R('pb-base','₹'+cfg.base.toLocaleString('en-IN'));
     R('pb-ot','+₹'+otPay.toLocaleString('en-IN'));R('pb-ot-lbl','Overtime ('+otH+'h '+otM+'m)');
     R('pb-incentive','+₹'+incentive.toLocaleString('en-IN'));
-    R('pb-absent-lbl','Absent ('+absent+' × ₹'+Math.round(perDay)+')');R('pb-absent','−₹'+absentD.toLocaleString('en-IN'));
+    var woffHrs=Math.floor(weeklyOffMins/60),woffMin=weeklyOffMins%60;
+    R('pb-woff-bonus','+₹'+weeklyOffBonus.toLocaleString('en-IN'));
+    R('pb-woff-lbl','Weekly Off Worked ('+woffHrs+'h '+woffMin+'m × ₹'+perDay+'/day prorated)');
+    var woffRow=document.getElementById('pb-woff-row');
+    if(woffRow)woffRow.style.display=weeklyOffWorked>0?'flex':'none';
+    R('pb-absent-lbl','Absent ('+absent+' × ₹'+perDay+')');R('pb-absent','−₹'+absentD.toLocaleString('en-IN'));
     R('pb-late-lbl','Late ('+late+(cfg.lateRule==='fixed'?' × ₹'+cfg.lateAmount:'')+')');R('pb-late','−₹'+lateD.toLocaleString('en-IN'));
     R('pb-advance','−₹'+advActual.toLocaleString('en-IN'));
     if(advCarryFwd>0) R('pb-adv-carry','⚠️ ₹'+advCarryFwd.toLocaleString('en-IN')+' carries forward');
@@ -1657,6 +1678,7 @@ td.g{color:#22c55e;}td.re{color:#ef4444;}
 <tr><td>Base Salary</td><td class="r g">${g('pb-base')}</td></tr>
 <tr><td>${g('pb-ot-lbl')}</td><td class="r g">${g('pb-ot')}</td></tr>
 <tr><td>Sales Incentive</td><td class="r g">${g('pb-incentive')}</td></tr>
+${document.getElementById('pb-woff-row')?.style.display!=='none'?'<tr><td>'+g('pb-woff-lbl')+'</td><td class="r g">'+g('pb-woff-bonus')+'</td></tr>':''}
 <tr><td>${g('pb-absent-lbl')}</td><td class="r re">${g('pb-absent')}</td></tr>
 <tr><td>${g('pb-late-lbl')}</td><td class="r re">${g('pb-late')}</td></tr>
 <tr><td>Advance Recovered</td><td class="r re">${g('pb-advance')}</td></tr></table>
@@ -2099,7 +2121,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.12.2</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.12.4</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -2403,6 +2425,7 @@ textarea.form-input{resize:none;}
           <div class="pay-row"><span class="pay-row-lbl">Base Salary</span><span class="pay-row-val" style="color:var(--green);" id="pb-base">₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl" id="pb-ot-lbl">Overtime (0 hrs)</span><span class="pay-row-val" style="color:var(--green);" id="pb-ot">+₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl">Sales Incentive</span><span class="pay-row-val" style="color:var(--green);" id="pb-incentive">+₹0</span></div>
+          <div class="pay-row" id="pb-woff-row" style="display:none;"><span class="pay-row-lbl" id="pb-woff-lbl">Weekly Off Worked</span><span class="pay-row-val" style="color:var(--green);" id="pb-woff-bonus">+₹0</span></div>
           <div class="pay-section">Deductions</div>
           <div class="pay-row"><span class="pay-row-lbl" id="pb-absent-lbl">Absent (0 days)</span><span class="pay-row-val" style="color:var(--red);" id="pb-absent">−₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl" id="pb-late-lbl">Late (0 days)</span><span class="pay-row-val" style="color:var(--red);" id="pb-late">−₹0</span></div>
@@ -2751,7 +2774,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.12.2</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.12.4</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2759,10 +2782,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.12.2 -->
+    <!-- v1.12.4 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.12.2</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.12.4</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
