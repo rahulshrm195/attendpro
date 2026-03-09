@@ -691,7 +691,9 @@ async function renderOwnerToday(){
       const selfie=last?last.inSelfie:(rec?rec.inSelfie:null);
       html+='<div class="row"><div class="row-main"><div class="row-title">'+s.name+
         (rec&&rec.late?' <span class="late-tag">LATE</span>':'')+(rec&&rec.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':'')+
-        '</div><div class="row-sub">'+sub+worked+dist+'</div></div>'+status+thumbHTML(selfie,s.name,rec?rec.inTime:null)+'</div>';
+        '</div><div class="row-sub">'+sub+worked+dist+'</div></div>'+
+        (hasOpen?'<button class="btn btn-ghost btn-xs" style="color:var(--accent2);border-color:var(--accent2);font-size:11px;padding:4px 8px;margin-right:6px;" onclick="fixPunchOut(\''+s.id+'\',\''+today+'\')">Fix Out</button>':'')+
+        status+thumbHTML(selfie,s.name,rec?rec.inTime:null)+'</div>';
     });
     const late=active.filter(s=>recs[s.id+'_'+today]?.late).map(s=>s.name);
     if(late.length)html+=`<div class="divider"></div><div style="color:var(--accent2);font-size:12px;font-weight:700">⚠️ Late: ${late.join(', ')}</div>`;
@@ -704,8 +706,59 @@ async function renderOwnerToday(){
 }
 
 // ─────────────────────────────────────────────
-//  INBOX
+//  FIX PUNCH OUT (manual correction by owner)
 // ─────────────────────────────────────────────
+window.fixPunchOut=async function(staffId,date){
+  var staffName=staffArr.find(function(s){return s.id===staffId;});
+  staffName=staffName?staffName.name:staffId;
+  // Default to current time
+  var now=new Date();
+  var hh=String(now.getHours()).padStart(2,'0');
+  var mm=String(now.getMinutes()).padStart(2,'0');
+  var defaultTime=hh+':'+mm;
+  var input=prompt('Set punch-out time for '+staffName+' on '+date+'\nFormat: HH:MM (24hr)',defaultTime);
+  if(!input)return;
+  var parts=input.trim().split(':');
+  if(parts.length!==2||isNaN(parts[0])||isNaN(parts[1]))return toast('Invalid time format. Use HH:MM',true);
+  var h=parseInt(parts[0]),m=parseInt(parts[1]);
+  if(h<0||h>23||m<0||m>59)return toast('Invalid time',true);
+  setLoading(true,'Updating punch-out…');
+  try{
+    var rec=await fbGet(p.rec(staffId,date)).catch(function(){return null;});
+    if(!rec)return toast('No attendance record found for this date',true);
+    var outISO=new Date(date+'T'+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':00').toISOString();
+    var fmt=function(hh,mm){var ampm=hh>=12?'PM':'AM';var h12=hh%12||12;return h12+':'+(mm<10?'0':'')+mm+' '+ampm;};
+    var outTime=fmt(h,m);
+    var sessions=rec.sessions&&rec.sessions.length?rec.sessions.slice():[];
+    if(sessions.length>0){
+      // Close the last open session
+      var last=sessions[sessions.length-1];
+      if(!last.outTime){
+        var inISO=last.inISO||new Date(date+'T00:00:00').toISOString();
+        var workedMins=Math.round((new Date(outISO)-new Date(inISO))/60000);
+        var wh=Math.floor(workedMins/60),wm=workedMins%60;
+        sessions[sessions.length-1]=Object.assign({},last,{outTime:outTime,outISO:outISO,workedMins:workedMins,workedDisplay:wh+'h '+wm+'m'});
+        var totalMins=sessions.reduce(function(s,ss){return s+(ss.workedMins||0);},0);
+        var th=Math.floor(totalMins/60),tm=totalMins%60;
+        await updateDoc(doc(db,p.rec(staffId,date)),{sessions:sessions,outTime:outTime,workedMins:totalMins,workedDisplay:th+'h '+tm+'m',manualOut:true,_updatedAt:serverTimestamp()});
+      } else {
+        toast('Last session already has a punch-out',true);setLoading(false);return;
+      }
+    } else {
+      // Legacy record without sessions
+      var inISO2=rec.inISO||new Date(date+'T09:00:00').toISOString();
+      var worked2=Math.round((new Date(outISO)-new Date(inISO2))/60000);
+      var wh2=Math.floor(worked2/60),wm2=worked2%60;
+      await updateDoc(doc(db,p.rec(staffId,date)),{outTime:outTime,outISO:outISO,workedMins:worked2,workedDisplay:wh2+'h '+wm2+'m',manualOut:true,_updatedAt:serverTimestamp()});
+    }
+    toast('✓ Punch-out set to '+outTime+' for '+staffName);
+    renderOwnerToday();
+    renderReport();
+  }catch(e){toast('Error: '+e.message,true);}
+  setLoading(false);
+};
+
+
 async function renderInbox(){
   setLoading(true,'Loading requests…');
   try{
@@ -834,10 +887,14 @@ window.renderReport=async function(){
         if(r.workedDisplay) sub+=' · '+r.workedDisplay;
         if(r.inDist!=null) sub+=' · '+r.inDist+'m';
         var selfie=sessions?sessions[0].inSelfie:r.inSelfie;
+        var hasOpenSession=sessions?sessions.some(function(ss){return !ss.outTime;}):!r.outTime;
         rhtml+='<div class="row"><div class="row-main"><div class="row-title">'+r.staffName+
           (r.late?' <span class="late-tag">LATE</span>':'')+(r.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':'')+
+          (r.manualOut?' <span style="font-size:10px;color:var(--muted)">(edited)</span>':'')+
           (r.manual?' <span style="font-size:10px;color:var(--muted)">(manual)</span>':'')+
-          '</div><div class="row-sub">'+r.date+' · '+sub+'</div></div>'+thumbHTML(selfie,r.staffName,inT)+'</div>';
+          '</div><div class="row-sub">'+r.date+' · '+sub+'</div></div>'+
+          (hasOpenSession?'<button class="btn btn-ghost btn-xs" style="color:var(--accent2);border-color:var(--accent2);font-size:11px;padding:4px 8px;" onclick="fixPunchOut(\''+r.staffId+'\',\''+r.date+'\')">Fix Out</button>':'')+
+          thumbHTML(selfie,r.staffName,inT)+'</div>';
       }
       document.getElementById('report-log').innerHTML=rhtml;
     }
@@ -1967,7 +2024,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.11.6</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.12.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -2591,7 +2648,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.11.6</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.12.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -2599,17 +2656,16 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.11.6 -->
+    <!-- v1.12.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.11.6</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.12.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Advance ledger Firebase path error (odd segments)</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Delete advance — 🗑️ button on pending advances, auto-corrects ledger balance</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--accent);flex-shrink:0;font-weight:700;">✦</span><span>Fix: Reports calendar label not updating on staff filter change</span></div>
-        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>No Weekly Off option — for staff working all 7 days</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Fix punch-out — owner can manually set punch-out for staff who forgot</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>"Fix Out" button on Today tab and Reports for any open session</span></div>
+        <div style="font-size:13px;display:flex;gap:8px;"><span style="color:var(--green);flex-shrink:0;font-weight:700;">+</span><span>Defaults to current time, recalculates hours worked automatically</span></div>
       </div>
     </div>
     <div style="height:1px;background:var(--border);margin-bottom:16px;"></div>
