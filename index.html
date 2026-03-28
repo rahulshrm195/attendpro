@@ -661,7 +661,6 @@ window.showOwnerTab=function(tab,btn){
   if(tab==='staff')renderStaffList();
   if(tab==='settings')loadOwnerSettings();
   if(tab==='qr')renderQRCode();
-  if(tab==='kiosk'){kioskStopCamera();kioskReset();}
 };
 
 // ─────────────────────────────────────────────
@@ -1720,194 +1719,200 @@ window.printQR=function(){
 };
 
 // ─────────────────────────────────────────────
-//  KIOSK MODE
+//  KIOSK LOGIN (standalone screen)
 // ─────────────────────────────────────────────
-var kioskSelectedStaff=null;
-var kioskPinEntry='';
-var kioskSelfieData=null;
-var kioskCountdownTimer=null;
-var kioskVideoStream=null;
+var ksBiz=null, ksBizId=null, ksStaffArr=[], ksSettings={};
+var ksSelectedStaff=null, ksPinEntry='', ksSelfieData=null;
+var ksCountdownTimer=null, ksVideoStream=null;
 
-function kioskStep(name){
-  var steps=['grid','pin','selfie','confirm'];
-  steps.forEach(function(s){
-    var el=document.getElementById('kiosk-step-'+s);
-    if(el) el.style.display=(s===name?'block':'none');
+window.kioskLogin=async function(){
+  var code=(document.getElementById('kiosk-login-code').value||'').trim().toUpperCase();
+  var pin=(document.getElementById('kiosk-login-pin').value||'').trim();
+  if(!code)return toast('Enter company code',true);
+  if(!pin)return toast('Enter kiosk PIN',true);
+  setLoading(true,'Connecting…');
+  try{
+    var allBiz=await fbList('businesses');
+    var match=allBiz.find(function(b){return b.companyCode===code;});
+    if(!match){setLoading(false);return toast('Company code not found',true);}
+    if(!match.kioskPin){setLoading(false);return toast('Kiosk PIN not set — ask owner to set it in Settings',true);}
+    if(match.kioskPin!==pin){setLoading(false);return toast('Wrong Kiosk PIN',true);}
+    ksBizId=match.id;ksBiz=match;
+    // Load settings and staff using match's id
+    var origBizId=BIZ_ID;BIZ_ID=ksBizId;
+    var sett=await fbGet(p.settings()).catch(function(){return null;});
+    if(sett)ksSettings=sett;
+    ksStaffArr=await fbList(p.staff()).catch(function(){return [];});
+    BIZ_ID=origBizId;
+    setLoading(false);
+    document.getElementById('kiosk-biz-name').textContent=ksBiz.name||'';
+    document.getElementById('kiosk-login-code').value='';
+    document.getElementById('kiosk-login-pin').value='';
+    ksReset();
+    showScreen('screen-kiosk');
+  }catch(e){setLoading(false);toast('Error: '+e.message,true);}
+};
+
+window.saveKioskPin=async function(){
+  var pin=v('set-kiosk-pin');
+  if(!pin||pin.length<4)return toast('PIN must be at least 4 digits',true);
+  if(isNaN(pin))return toast('PIN must be numbers only',true);
+  try{
+    await fbSet(p.biz(),{kioskPin:pin});
+    biz.kioskPin=pin;ls.set('ap_biz_cache',biz);
+    document.getElementById('set-kiosk-pin').value='';
+    toast('✓ Kiosk PIN saved');
+  }catch(e){toast('Error: '+e.message,true);}
+};
+
+function ksStep(name){
+  ['grid','pin','selfie','confirm'].forEach(function(s){
+    var el=document.getElementById('ks-step-'+s);
+    if(el)el.style.display=(s===name?'block':'none');
   });
 }
 
-function kioskReset(){
-  kioskSelectedStaff=null;
-  kioskPinEntry='';
-  kioskSelfieData=null;
-  if(kioskCountdownTimer){clearInterval(kioskCountdownTimer);kioskCountdownTimer=null;}
-  kioskStopCamera();
-  kioskStep('grid');
-  kioskRenderGrid();
+function ksReset(){
+  ksSelectedStaff=null;ksPinEntry='';ksSelfieData=null;
+  if(ksCountdownTimer){clearInterval(ksCountdownTimer);ksCountdownTimer=null;}
+  ksStopCamera();
+  ksStep('grid');
+  ksRenderGrid();
 }
 
-function kioskRenderGrid(){
-  var el=document.getElementById('kiosk-staff-grid');
-  if(!el)return;
-  var active=staffArr.filter(function(s){return s.active;});
+function ksRenderGrid(){
+  var el=document.getElementById('ks-staff-grid');if(!el)return;
+  var active=ksStaffArr.filter(function(s){return s.active;});
   if(!active.length){el.innerHTML='<div style="grid-column:span 2;text-align:center;color:var(--muted);padding:30px;">No active staff</div>';return;}
   el.innerHTML=active.map(function(s){
-    return '<div class="kiosk-card" onclick="kioskSelectStaff(\''+s.id+'\')">'+
+    return '<div class="kiosk-card" onclick="ksSelectStaff(\''+s.id+'\')">'+
       '<div class="kiosk-card-avatar">'+s.name.charAt(0).toUpperCase()+'</div>'+
       '<div class="kiosk-card-name">'+s.name+'</div>'+
-      '<div class="kiosk-card-status" id="kiosk-status-'+s.id+'">...</div>'+
+      '<div class="kiosk-card-status" id="ks-status-'+s.id+'" style="color:var(--muted);font-size:11px;margin-top:4px;">Loading…</div>'+
     '</div>';
   }).join('');
-  // Load today's records to show IN/OUT status on each card
+  // Load live status
   var today=todayStr();
+  var origBizId=BIZ_ID;BIZ_ID=ksBizId;
   fbList(p.recs(),where('date','==',today)).then(function(recs){
+    BIZ_ID=origBizId;
     active.forEach(function(s){
       var rec=recs.find(function(r){return r.staffId===s.id;});
-      var el2=document.getElementById('kiosk-status-'+s.id);
-      if(!el2)return;
+      var el2=document.getElementById('ks-status-'+s.id);if(!el2)return;
       if(!rec||!rec.inTime){
         el2.style.color='var(--muted)';el2.textContent='Not in yet';
       } else {
         var sessions=rec.sessions||[];
         var last=sessions.length?sessions[sessions.length-1]:null;
-        var hasOpen=last&&last.inTime&&!last.outTime;
-        if(hasOpen){
-          el2.style.color='var(--green)';el2.textContent='✅ IN since '+last.inTime;
+        if(last&&last.inTime&&!last.outTime){
+          el2.style.color='var(--green)';el2.textContent='✅ IN · '+last.inTime;
         } else {
-          el2.style.color='var(--muted)';el2.textContent='Out · '+rec.outTime;
+          el2.style.color='var(--muted)';el2.textContent='Out · '+(rec.outTime||'');
         }
       }
     });
-  }).catch(function(){});
+  }).catch(function(){BIZ_ID=origBizId;});
 }
 
-window.kioskSelectStaff=function(sid){
-  var s=staffArr.find(function(x){return x.id===sid;});
-  if(!s)return;
-  kioskSelectedStaff=s;
-  kioskPinEntry='';
-  document.getElementById('kiosk-pin-avatar').textContent=s.name.charAt(0).toUpperCase();
-  document.getElementById('kiosk-pin-name').textContent=s.name;
-  document.getElementById('kiosk-pin-error').textContent='';
-  // Determine punch direction to show status
+window.ksSelectStaff=function(sid){
+  var s=ksStaffArr.find(function(x){return x.id===sid;});if(!s)return;
+  ksSelectedStaff=s;ksPinEntry='';
+  document.getElementById('ks-pin-avatar').textContent=s.name.charAt(0).toUpperCase();
+  document.getElementById('ks-pin-name').textContent=s.name;
+  document.getElementById('ks-pin-error').textContent='';
+  // Show punch direction
   var today=todayStr();
+  var origBizId=BIZ_ID;BIZ_ID=ksBizId;
   fbGet(p.rec(sid,today)).then(function(rec){
-    var statusEl=document.getElementById('kiosk-pin-status');
-    if(!statusEl)return;
-    if(!rec||!rec.inTime){
-      statusEl.textContent='Will punch IN';
-    } else {
+    BIZ_ID=origBizId;
+    var el=document.getElementById('ks-pin-action');if(!el)return;
+    if(!rec||!rec.inTime){el.textContent='Will punch IN';}
+    else{
       var sessions=rec.sessions||[];
       var last=sessions.length?sessions[sessions.length-1]:null;
-      var hasOpen=last&&last.inTime&&!last.outTime;
-      statusEl.textContent=hasOpen?'Will punch OUT':'Will punch IN again';
+      el.textContent=(last&&last.inTime&&!last.outTime)?'Will punch OUT':'Will punch IN again';
     }
-  }).catch(function(){
-    var statusEl=document.getElementById('kiosk-pin-status');
-    if(statusEl)statusEl.textContent='Will punch IN';
-  });
-  kioskUpdateDots();
-  kioskStep('pin');
+  }).catch(function(){BIZ_ID=origBizId;var el=document.getElementById('ks-pin-action');if(el)el.textContent='Will punch IN';});
+  ksUpdateDots();
+  ksStep('pin');
 };
 
-window.kioskPinKey=function(digit){
-  if(kioskPinEntry.length>=4)return;
-  kioskPinEntry+=digit;
-  kioskUpdateDots();
-  if(kioskPinEntry.length===4) kioskVerifyPin();
+window.ksPinKey=function(digit){
+  if(ksPinEntry.length>=4)return;
+  ksPinEntry+=digit;
+  ksUpdateDots();
+  if(ksPinEntry.length===4)ksVerifyPin();
+};
+window.ksPinBackspace=function(){
+  if(!ksPinEntry.length)return;
+  ksPinEntry=ksPinEntry.slice(0,-1);
+  ksUpdateDots();
+  document.getElementById('ks-pin-error').textContent='';
 };
 
-window.kioskPinBackspace=function(){
-  if(!kioskPinEntry.length)return;
-  kioskPinEntry=kioskPinEntry.slice(0,-1);
-  kioskUpdateDots();
-  document.getElementById('kiosk-pin-error').textContent='';
-};
-
-function kioskUpdateDots(){
+function ksUpdateDots(){
   for(var i=0;i<4;i++){
-    var dot=document.getElementById('kd'+i);
-    if(!dot)continue;
+    var dot=document.getElementById('ks-kd'+i);if(!dot)continue;
     dot.classList.remove('filled','error');
-    if(i<kioskPinEntry.length) dot.classList.add('filled');
+    if(i<ksPinEntry.length)dot.classList.add('filled');
   }
 }
 
-function kioskVerifyPin(){
-  var s=kioskSelectedStaff;
-  if(!s)return;
-  if(kioskPinEntry===s.pin){
-    document.getElementById('kiosk-pin-error').textContent='';
-    kioskOpenCamera();
+function ksVerifyPin(){
+  var s=ksSelectedStaff;if(!s)return;
+  if(ksPinEntry===s.pin){
+    document.getElementById('ks-pin-error').textContent='';
+    ksOpenCamera();
   } else {
-    // Wrong PIN — shake dots red then clear
-    for(var i=0;i<4;i++){
-      var dot=document.getElementById('kd'+i);
-      if(dot){dot.classList.remove('filled');dot.classList.add('error');}
-    }
-    document.getElementById('kiosk-pin-error').textContent='Wrong PIN. Try again.';
-    var entry=kioskPinEntry;
-    kioskPinEntry='';
+    for(var i=0;i<4;i++){var dot=document.getElementById('ks-kd'+i);if(dot){dot.classList.remove('filled');dot.classList.add('error');}}
+    document.getElementById('ks-pin-error').textContent='Wrong PIN. Try again.';
+    ksPinEntry='';
     setTimeout(function(){
-      for(var i=0;i<4;i++){
-        var dot=document.getElementById('kd'+i);
-        if(dot) dot.classList.remove('error');
-      }
-      document.getElementById('kiosk-pin-error').textContent='';
+      for(var i=0;i<4;i++){var dot=document.getElementById('ks-kd'+i);if(dot)dot.classList.remove('error');}
+      document.getElementById('ks-pin-error').textContent='';
     },900);
   }
 }
 
-function kioskOpenCamera(){
-  kioskStep('selfie');
-  var s=kioskSelectedStaff;
-  document.getElementById('kiosk-selfie-title').textContent='📸 '+s.name+' — Take a selfie';
-  var vid=document.getElementById('kiosk-video');
+function ksOpenCamera(){
+  ksStep('selfie');
+  var s=ksSelectedStaff;
+  document.getElementById('ks-selfie-title').textContent='📸 '+s.name+' — Take a selfie';
+  var vid=document.getElementById('ks-video');
   navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false})
-    .then(function(stream){
-      kioskVideoStream=stream;
-      vid.srcObject=stream;
-    })
-    .catch(function(){
-      // Camera failed — skip selfie, go straight to punch
-      kioskSelfieData=null;
-      kioskDoPunch();
-    });
+    .then(function(stream){ksVideoStream=stream;vid.srcObject=stream;})
+    .catch(function(){ksSelfieData=null;ksDoPunch();});
 }
 
-function kioskStopCamera(){
-  if(kioskVideoStream){
-    kioskVideoStream.getTracks().forEach(function(t){t.stop();});
-    kioskVideoStream=null;
-  }
-  var vid=document.getElementById('kiosk-video');
-  if(vid) vid.srcObject=null;
+function ksStopCamera(){
+  if(ksVideoStream){ksVideoStream.getTracks().forEach(function(t){t.stop();});ksVideoStream=null;}
+  var vid=document.getElementById('ks-video');if(vid)vid.srcObject=null;
 }
 
-window.kioskCaptureSelfie=function(){
-  var vid=document.getElementById('kiosk-video');
-  if(!vid||!vid.srcObject){kioskSelfieData=null;kioskDoPunch();return;}
+window.ksCaptureSelfie=function(){
+  var vid=document.getElementById('ks-video');
+  if(!vid||!vid.srcObject){ksSelfieData=null;ksDoPunch();return;}
   var canvas=document.createElement('canvas');
   canvas.width=320;canvas.height=320;
   var ctx=canvas.getContext('2d');
-  // Mirror the capture to match preview
   ctx.translate(320,0);ctx.scale(-1,1);
   ctx.drawImage(vid,0,0,320,320);
-  kioskSelfieData=canvas.toDataURL('image/jpeg',0.6);
-  kioskStopCamera();
-  kioskDoPunch();
+  ksSelfieData=canvas.toDataURL('image/jpeg',0.6);
+  ksStopCamera();
+  ksDoPunch();
 };
 
-async function kioskDoPunch(){
-  var s=kioskSelectedStaff;
-  if(!s)return;
-  var now=new Date(),ts=formatTime(now),today=todayStr();
-  var isoTs=now.toISOString();
+window.ksCancel=function(){ksReset();};
+
+async function ksDoPunch(){
+  var s=ksSelectedStaff;if(!s)return;
+  var now=new Date(),ts=formatTime(now),today=todayStr(),isoTs=now.toISOString();
+  var origBizId=BIZ_ID;BIZ_ID=ksBizId;
   var key=p.rec(s.id,today);
   var rec=null;
   try{rec=await fbGet(key);}catch{}
-  if(!rec) rec={staffId:s.id,staffName:s.name,date:today,sessions:[]};
-  if(!rec.sessions) rec.sessions=[];
+  if(!rec)rec={staffId:s.id,staffName:s.name,date:today,sessions:[]};
+  if(!rec.sessions)rec.sessions=[];
 
   // GPS
   var gpsData={};
@@ -1917,11 +1922,10 @@ async function kioskDoPunch(){
     });
     var lat=pos.coords.latitude,lng=pos.coords.longitude,acc=Math.round(pos.coords.accuracy);
     gpsData={lat:lat,lng:lng,accuracy:acc};
-    var storeLat=settings.storeLat,storeLng=settings.storeLng,radius=settings.storeRadius||300;
+    var storeLat=ksSettings.storeLat,storeLng=ksSettings.storeLng,radius=ksSettings.storeRadius||300;
     if(storeLat&&storeLng){
       var dist=Math.round(haversineM(lat,lng,storeLat,storeLng));
-      gpsData.dist=dist;
-      gpsData.flagged=dist>(radius+acc);
+      gpsData.dist=dist;gpsData.flagged=dist>(radius+acc);
     }
   }catch(e){gpsData={error:'GPS unavailable'};}
 
@@ -1931,17 +1935,20 @@ async function kioskDoPunch(){
   var isIn=!hasOpen;
 
   if(isIn){
-    var newSess={inTime:ts,inISO:isoTs,inSelfie:kioskSelfieData,inGps:gpsData,source:'kiosk'};
-    if(gpsData.dist!=null) newSess.inDist=gpsData.dist;
+    var newSess={inTime:ts,inISO:isoTs,inSelfie:ksSelfieData,inGps:gpsData,source:'kiosk'};
+    if(gpsData.dist!=null)newSess.inDist=gpsData.dist;
     if(gpsData.flagged){newSess.gpsFlag=true;rec.gpsFlag=true;}
-    if(sessions.length===0) rec.late=isLate(now,s);
+    // Use ksSettings for late check
+    var lateH=parseInt((ksSettings.punchInTime||'10:00').split(':')[0]);
+    var lateM=parseInt((ksSettings.punchInTime||'10:00').split(':')[1]);
+    if(sessions.length===0)rec.late=(now.getHours()>lateH||(now.getHours()===lateH&&now.getMinutes()>lateM));
     sessions.push(newSess);
     rec.inTime=sessions[0].inTime;
   } else {
     last.outTime=ts;last.outISO=isoTs;
-    last.outSelfie=kioskSelfieData;last.outGps=gpsData;
-    if(gpsData.dist!=null) last.outDist=gpsData.dist;
-    if(gpsData.flagged&&!rec.gpsFlag) rec.gpsFlag=true;
+    last.outSelfie=ksSelfieData;last.outGps=gpsData;
+    if(gpsData.dist!=null)last.outDist=gpsData.dist;
+    if(gpsData.flagged&&!rec.gpsFlag)rec.gpsFlag=true;
     var mins=Math.round((now-new Date(last.inISO))/60000);
     last.workedMins=mins;last.workedDisplay=minsToHM(mins);
     var tot=sessions.reduce(function(a,ss){return a+(ss.workedMins||0);},0);
@@ -1949,39 +1956,32 @@ async function kioskDoPunch(){
     rec.outTime=ts;
   }
   rec.sessions=sessions;
+  try{await fbSet(key,rec);}catch{}
+  BIZ_ID=origBizId;
 
-  try{await fbSet(key,rec);}catch{toast('⚠️ Saved locally',true);}
-
-  // Show confirm screen
-  kioskStep('confirm');
-  var icon=isIn?'✅':'👋';
-  var title=isIn?'Punched IN!':'Punched OUT!';
+  // Confirm screen
+  ksStep('confirm');
+  document.getElementById('ks-confirm-icon').textContent=isIn?'✅':'👋';
+  document.getElementById('ks-confirm-title').textContent=isIn?'Punched IN!':'Punched OUT!';
   var lateTag=isIn&&rec.late?' · Late':'';
-  var distTag=gpsData.dist!=null?' · '+gpsData.dist+'m':'';
+  var distTag=gpsData.dist!=null?' · '+gpsData.dist+'m from store':'';
   var flagTag=gpsData.flagged?' · ⚠️ Location flag':'';
-  document.getElementById('kiosk-confirm-icon').textContent=icon;
-  document.getElementById('kiosk-confirm-title').textContent=title;
-  document.getElementById('kiosk-confirm-sub').textContent=s.name+' · '+ts+lateTag+distTag+flagTag;
-  var selfieImg=document.getElementById('kiosk-confirm-selfie');
-  if(kioskSelfieData&&selfieImg){
-    selfieImg.src=kioskSelfieData;selfieImg.style.display='block';
-  } else if(selfieImg){
-    selfieImg.style.display='none';
-  }
-  sendNotif(isIn?'Punched In ✓':'Punched Out ✓',s.name+' · '+ts+(gpsData.flagged?' · ⚠️ Location flagged':''),'punch');
+  document.getElementById('ks-confirm-sub').textContent=s.name+' · '+ts+lateTag+distTag+flagTag;
+  var selfieImg=document.getElementById('ks-confirm-selfie');
+  if(ksSelfieData&&selfieImg){selfieImg.src=ksSelfieData;selfieImg.style.display='block';}
+  else if(selfieImg)selfieImg.style.display='none';
 
-  // Countdown reset
+  // Countdown
   var secs=5;
-  var cdEl=document.getElementById('kiosk-countdown');
-  if(cdEl) cdEl.textContent='Resetting in '+secs+'s…';
-  kioskCountdownTimer=setInterval(function(){
+  var cdEl=document.getElementById('ks-countdown');
+  if(cdEl)cdEl.textContent='Resetting in '+secs+'s…';
+  ksCountdownTimer=setInterval(function(){
     secs--;
-    if(cdEl) cdEl.textContent=secs>0?'Resetting in '+secs+'s…':'';
-    if(secs<=0){clearInterval(kioskCountdownTimer);kioskCountdownTimer=null;kioskReset();}
+    if(cdEl)cdEl.textContent=secs>0?'Resetting in '+secs+'s…':'';
+    if(secs<=0){clearInterval(ksCountdownTimer);ksCountdownTimer=null;ksReset();}
   },1000);
 }
 
-window.kioskCancel=function(){kioskReset();};
 
 // ─────────────────────────────────────────────
 //  SALARY SLIP PRINT
@@ -2470,7 +2470,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.14.0</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -2481,6 +2481,7 @@ textarea.form-input{resize:none;}
   <div style="padding:0 16px 48px;display:flex;flex-direction:column;gap:10px;">
     <button class="btn btn-primary" onclick="showScreen('screen-staff-connect')" style="font-size:16px;padding:16px;">👤 I'm Staff — Join My Company</button>
     <button class="btn btn-secondary" onclick="showScreen('screen-setup')">🏢 Set Up My Business</button>
+    <button class="btn btn-ghost" onclick="showScreen('screen-kiosk-login')" style="font-size:14px;color:var(--text);border:1.5px solid var(--border);">🖥️ Kiosk — Shared Device</button>
     <button class="btn btn-ghost" onclick="showScreen('screen-device-login')" style="font-size:13px;color:var(--muted);">🔐 Owner on a new device</button>
   </div>
 </div>
@@ -2709,7 +2710,6 @@ textarea.form-input{resize:none;}
       <button class="tab" onclick="showOwnerTab('staff',this)">Staff</button>
       <button class="tab" onclick="showOwnerTab('settings',this)">Settings</button>
       <button class="tab" onclick="showOwnerTab('qr',this)">QR</button>
-      <button class="tab" onclick="showOwnerTab('kiosk',this)">🖥️ Kiosk</button>
     </div>
     <!-- TODAY -->
     <div class="page active" id="owner-today">
@@ -2897,6 +2897,13 @@ textarea.form-input{resize:none;}
       </div><!-- /card change pass -->
 
       <div class="card">
+        <div class="card-title">🖥️ Kiosk PIN</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Staff enter this PIN on the shared kiosk device to access punch mode. Keep it different from your owner password.</p>
+        <div class="form-group"><label class="form-label">Kiosk PIN (4–6 digits)</label><input type="password" class="form-input" id="set-kiosk-pin" placeholder="e.g. 1234" inputmode="numeric" maxlength="6"></div>
+        <button class="btn btn-secondary btn-sm" onclick="saveKioskPin()">Set Kiosk PIN</button>
+      </div><!-- /card kiosk pin -->
+
+      <div class="card">
         <div class="card-title">Mark Holiday / Leave</div>
         <div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="mark-date"></div>
         <div class="form-group"><label class="form-label">Type</label>
@@ -2932,69 +2939,102 @@ textarea.form-input{resize:none;}
         <button class="btn btn-primary" onclick="printQR()">🖨️ Print QR Code</button>
       </div>
     </div>
-    <!-- KIOSK -->
-    <div class="page" id="owner-kiosk">
-      <!-- STEP: Staff Grid -->
-      <div id="kiosk-step-grid">
-        <div style="text-align:center;padding:18px 0 10px;">
-          <div style="font-size:22px;font-weight:800;font-family:var(--fh);color:var(--text);">👋 Who are you?</div>
-          <div style="font-size:13px;color:var(--muted);margin-top:4px;">Tap your name to punch in or out</div>
-        </div>
-        <div id="kiosk-staff-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:8px 0 20px;"></div>
-      </div>
-      <!-- STEP: PIN Entry -->
-      <div id="kiosk-step-pin" style="display:none;">
-        <div style="text-align:center;padding:18px 0 6px;">
-          <div id="kiosk-pin-avatar" style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-family:var(--fh);font-weight:800;color:#fff;font-size:26px;margin:0 auto 10px;"></div>
-          <div id="kiosk-pin-name" style="font-size:20px;font-weight:800;font-family:var(--fh);"></div>
-          <div id="kiosk-pin-status" style="font-size:13px;color:var(--muted);margin-top:4px;"></div>
-          <div style="font-size:13px;font-weight:700;color:var(--accent);margin-top:10px;">Enter your 4-digit PIN</div>
-        </div>
-        <div id="kiosk-pin-dots" style="display:flex;justify-content:center;gap:14px;margin:14px 0;">
-          <div class="kiosk-dot" id="kd0"></div>
-          <div class="kiosk-dot" id="kd1"></div>
-          <div class="kiosk-dot" id="kd2"></div>
-          <div class="kiosk-dot" id="kd3"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:280px;margin:0 auto;">
-          <button class="kiosk-key" onclick="kioskPinKey('1')">1</button>
-          <button class="kiosk-key" onclick="kioskPinKey('2')">2</button>
-          <button class="kiosk-key" onclick="kioskPinKey('3')">3</button>
-          <button class="kiosk-key" onclick="kioskPinKey('4')">4</button>
-          <button class="kiosk-key" onclick="kioskPinKey('5')">5</button>
-          <button class="kiosk-key" onclick="kioskPinKey('6')">6</button>
-          <button class="kiosk-key" onclick="kioskPinKey('7')">7</button>
-          <button class="kiosk-key" onclick="kioskPinKey('8')">8</button>
-          <button class="kiosk-key" onclick="kioskPinKey('9')">9</button>
-          <button class="kiosk-key" onclick="kioskCancel()" style="font-size:13px;color:var(--muted);">Cancel</button>
-          <button class="kiosk-key" onclick="kioskPinKey('0')">0</button>
-          <button class="kiosk-key" onclick="kioskPinBackspace()">⌫</button>
-        </div>
-        <div id="kiosk-pin-error" style="text-align:center;color:var(--red);font-size:13px;font-weight:700;margin-top:14px;min-height:20px;"></div>
-      </div>
-      <!-- STEP: Selfie -->
-      <div id="kiosk-step-selfie" style="display:none;">
-        <div style="text-align:center;padding:14px 0 10px;">
-          <div style="font-size:17px;font-weight:800;font-family:var(--fh);" id="kiosk-selfie-title">📸 Take a selfie</div>
-          <div style="font-size:13px;color:var(--muted);margin-top:4px;">Look at the camera and tap Capture</div>
-        </div>
-        <div style="position:relative;border-radius:16px;overflow:hidden;background:#000;margin-bottom:14px;">
-          <video id="kiosk-video" autoplay playsinline muted style="width:100%;max-height:320px;object-fit:cover;display:block;transform:scaleX(-1);"></video>
-        </div>
-        <button class="btn btn-primary" onclick="kioskCaptureSelfie()" style="font-size:16px;padding:16px;">📸 Capture</button>
-        <button class="btn btn-ghost" onclick="kioskCancel()" style="margin-top:8px;">Cancel</button>
-      </div>
-      <!-- STEP: Confirm -->
-      <div id="kiosk-step-confirm" style="display:none;text-align:center;padding:30px 0;">
-        <div id="kiosk-confirm-icon" style="font-size:64px;margin-bottom:12px;"></div>
-        <div id="kiosk-confirm-title" style="font-size:24px;font-weight:800;font-family:var(--fh);margin-bottom:6px;"></div>
-        <div id="kiosk-confirm-sub" style="font-size:14px;color:var(--muted);margin-bottom:18px;line-height:1.6;"></div>
-        <img id="kiosk-confirm-selfie" style="width:90px;height:90px;border-radius:50%;object-fit:cover;border:3px solid var(--accent);margin-bottom:18px;display:none;">
-        <div id="kiosk-countdown" style="font-size:13px;color:var(--muted);"></div>
-      </div>
-    </div>
   </div><!-- /owner-panel-wrap -->
 </div><!-- /screen-owner -->
+
+<!-- ══════════════════════════════════
+     KIOSK LOGIN
+══════════════════════════════════ -->
+<div class="screen" id="screen-kiosk-login">
+  <div class="top-bar">
+    <div><div class="tb-title">AttendPro</div><div class="tb-sub">Kiosk Login</div></div>
+    <button class="btn btn-ghost btn-sm" onclick="showScreen('screen-landing')">← Back</button>
+  </div>
+  <div style="padding:24px 20px;max-width:400px;margin:0 auto;">
+    <div style="text-align:center;margin-bottom:24px;">
+      <div style="font-size:48px;margin-bottom:8px;">🖥️</div>
+      <div style="font-size:20px;font-weight:800;font-family:var(--fh);">Kiosk Mode</div>
+      <div style="font-size:13px;color:var(--muted);margin-top:6px;">For shared devices at the shop counter</div>
+    </div>
+    <div class="card">
+      <div class="form-group"><label class="form-label">Company Code</label>
+        <input class="form-input" id="kiosk-login-code" placeholder="e.g. SRSHOES" autocapitalize="characters" autocorrect="off" style="font-family:var(--fh);font-weight:700;letter-spacing:2px;font-size:18px;text-transform:uppercase;"></div>
+      <div class="form-group"><label class="form-label">Kiosk PIN</label>
+        <input type="password" class="form-input" id="kiosk-login-pin" placeholder="Set by owner" inputmode="numeric" maxlength="6"></div>
+      <button class="btn btn-primary" onclick="kioskLogin()" style="font-size:15px;">Enter Kiosk →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     KIOSK SCREEN
+══════════════════════════════════ -->
+<div class="screen" id="screen-kiosk">
+  <div style="padding:12px 16px 0;display:flex;align-items:center;justify-content:space-between;">
+    <div style="font-family:var(--fh);font-weight:800;font-size:16px;color:var(--accent);">AttendPro Kiosk</div>
+    <div id="kiosk-biz-name" style="font-size:12px;color:var(--muted);"></div>
+  </div>
+  <div style="padding:0 16px 24px;max-width:500px;margin:0 auto;" id="kiosk-main">
+    <!-- STEP: Staff Grid -->
+    <div id="ks-step-grid">
+      <div style="text-align:center;padding:18px 0 10px;">
+        <div style="font-size:22px;font-weight:800;font-family:var(--fh);color:var(--text);">👋 Who are you?</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:4px;">Tap your name to punch in or out</div>
+      </div>
+      <div id="ks-staff-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:4px 0 20px;"></div>
+    </div>
+    <!-- STEP: PIN Entry -->
+    <div id="ks-step-pin" style="display:none;">
+      <div style="text-align:center;padding:18px 0 6px;">
+        <div id="ks-pin-avatar" style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-family:var(--fh);font-weight:800;color:#fff;font-size:26px;margin:0 auto 10px;"></div>
+        <div id="ks-pin-name" style="font-size:20px;font-weight:800;font-family:var(--fh);"></div>
+        <div id="ks-pin-action" style="font-size:13px;color:var(--muted);margin-top:4px;"></div>
+        <div style="font-size:13px;font-weight:700;color:var(--accent);margin-top:10px;">Enter your 4-digit PIN</div>
+      </div>
+      <div style="display:flex;justify-content:center;gap:14px;margin:14px 0;">
+        <div class="kiosk-dot" id="ks-kd0"></div>
+        <div class="kiosk-dot" id="ks-kd1"></div>
+        <div class="kiosk-dot" id="ks-kd2"></div>
+        <div class="kiosk-dot" id="ks-kd3"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:280px;margin:0 auto;">
+        <button class="kiosk-key" onclick="ksPinKey('1')">1</button>
+        <button class="kiosk-key" onclick="ksPinKey('2')">2</button>
+        <button class="kiosk-key" onclick="ksPinKey('3')">3</button>
+        <button class="kiosk-key" onclick="ksPinKey('4')">4</button>
+        <button class="kiosk-key" onclick="ksPinKey('5')">5</button>
+        <button class="kiosk-key" onclick="ksPinKey('6')">6</button>
+        <button class="kiosk-key" onclick="ksPinKey('7')">7</button>
+        <button class="kiosk-key" onclick="ksPinKey('8')">8</button>
+        <button class="kiosk-key" onclick="ksPinKey('9')">9</button>
+        <button class="kiosk-key" onclick="ksCancel()" style="font-size:13px;color:var(--muted);">Cancel</button>
+        <button class="kiosk-key" onclick="ksPinKey('0')">0</button>
+        <button class="kiosk-key" onclick="ksPinBackspace()">⌫</button>
+      </div>
+      <div id="ks-pin-error" style="text-align:center;color:var(--red);font-size:13px;font-weight:700;margin-top:14px;min-height:20px;"></div>
+    </div>
+    <!-- STEP: Selfie -->
+    <div id="ks-step-selfie" style="display:none;">
+      <div style="text-align:center;padding:14px 0 10px;">
+        <div style="font-size:17px;font-weight:800;font-family:var(--fh);" id="ks-selfie-title">📸 Take a selfie</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:4px;">Look at the camera and tap Capture</div>
+      </div>
+      <div style="border-radius:16px;overflow:hidden;background:#000;margin-bottom:14px;">
+        <video id="ks-video" autoplay playsinline muted style="width:100%;max-height:300px;object-fit:cover;display:block;transform:scaleX(-1);"></video>
+      </div>
+      <button class="btn btn-primary" onclick="ksCaptureSelfie()" style="font-size:16px;padding:16px;">📸 Capture</button>
+      <button class="btn btn-ghost" onclick="ksCancel()" style="margin-top:8px;">Cancel</button>
+    </div>
+    <!-- STEP: Confirm -->
+    <div id="ks-step-confirm" style="display:none;text-align:center;padding:30px 0;">
+      <div id="ks-confirm-icon" style="font-size:64px;margin-bottom:12px;"></div>
+      <div id="ks-confirm-title" style="font-size:24px;font-weight:800;font-family:var(--fh);margin-bottom:6px;"></div>
+      <div id="ks-confirm-sub" style="font-size:14px;color:var(--muted);margin-bottom:18px;line-height:1.6;"></div>
+      <img id="ks-confirm-selfie" style="width:90px;height:90px;border-radius:50%;object-fit:cover;border:3px solid var(--accent);margin-bottom:18px;display:none;">
+      <div id="ks-countdown" style="font-size:13px;color:var(--muted);"></div>
+    </div>
+  </div>
+</div>
 
 <!-- ══ SHEET: Leave Request (staff) ══ -->
 <div class="sheet-overlay" id="sheet-leave-req">
@@ -3193,7 +3233,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.14.0</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3201,10 +3241,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.14.0 -->
+    <!-- v1.15.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.14.0</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
