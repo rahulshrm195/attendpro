@@ -133,6 +133,44 @@ const saveSession = (v)=>ls.set('ap_session',v);
 // ─────────────────────────────────────────────
 async function boot(){
   hideSplash();
+
+  // ── Kiosk session restore — check before anything else ──
+  var kSess=localStorage.getItem('ap_kiosk_session');
+  if(kSess){
+    try{
+      var kData=JSON.parse(kSess);
+      ksBizId=kData.bizId;
+      // Try to reload fresh data, fall back to cache
+      BIZ_ID=ksBizId;
+      setLoading(true,'Loading kiosk…');
+      try{
+        ksBiz=await fbGet(p.biz()).catch(function(){return null;});
+        if(!ksBiz)ksBiz=ls.get('ap_kiosk_biz_cache');
+        var sett=await fbGet(p.settings()).catch(function(){return null;});
+        ksSettings=sett||ls.get('ap_kiosk_settings_cache',{punchInTime:'10:00'});
+        ksStaffArr=await fbList(p.staff()).catch(function(){return [];});
+        if(!ksStaffArr.length)ksStaffArr=ls.get('ap_kiosk_staff_cache',[]);
+        // Refresh caches
+        if(ksBiz)ls.set('ap_kiosk_biz_cache',ksBiz);
+        if(ksStaffArr.length)ls.set('ap_kiosk_staff_cache',ksStaffArr);
+        ls.set('ap_kiosk_settings_cache',ksSettings);
+      }catch(e){
+        ksBiz=ls.get('ap_kiosk_biz_cache');
+        ksSettings=ls.get('ap_kiosk_settings_cache',{punchInTime:'10:00'});
+        ksStaffArr=ls.get('ap_kiosk_staff_cache',[]);
+      }
+      BIZ_ID=null; // reset — kiosk uses ksBizId internally
+      setLoading(false);
+      if(ksBiz){
+        document.getElementById('kiosk-biz-name').textContent=ksBiz.name||'';
+        ksReset();
+        showScreen('screen-kiosk');
+        return;
+      }
+    }catch(e){localStorage.removeItem('ap_kiosk_session');}
+    setLoading(false);
+  }
+
   BIZ_ID = localStorage.getItem('ap_biz_id');
 
   // If we have a cached BIZ_ID, load directly
@@ -1779,12 +1817,16 @@ window.kioskLogin=async function(){
     if(!match.kioskPin){setLoading(false);return toast('Kiosk PIN not set — ask owner to set it in Settings',true);}
     if(match.kioskPin!==pin){setLoading(false);return toast('Wrong Kiosk PIN',true);}
     ksBizId=match.id;ksBiz=match;
-    // Load settings and staff using match's id
     var origBizId=BIZ_ID;BIZ_ID=ksBizId;
     var sett=await fbGet(p.settings()).catch(function(){return null;});
     if(sett)ksSettings=sett;
     ksStaffArr=await fbList(p.staff()).catch(function(){return [];});
     BIZ_ID=origBizId;
+    // ── Persist kiosk session so refresh/reopen goes back to kiosk ──
+    localStorage.setItem('ap_kiosk_session', JSON.stringify({bizId:ksBizId,companyCode:code}));
+    ls.set('ap_kiosk_biz_cache',ksBiz);
+    ls.set('ap_kiosk_staff_cache',ksStaffArr);
+    ls.set('ap_kiosk_settings_cache',ksSettings);
     setLoading(false);
     document.getElementById('kiosk-biz-name').textContent=ksBiz.name||'';
     document.getElementById('kiosk-login-code').value='';
@@ -1944,6 +1986,62 @@ window.ksCaptureSelfie=function(){
 };
 
 window.ksCancel=function(){ksReset();};
+
+var ksExitPin='';
+window.ksShowExit=function(){
+  ksExitPin='';
+  ksExitUpdateDots();
+  document.getElementById('ks-exit-error').textContent='';
+  document.getElementById('ks-exit-overlay').style.display='block';
+};
+window.ksExitCancel=function(){
+  ksExitPin='';
+  document.getElementById('ks-exit-overlay').style.display='none';
+};
+window.ksExitKey=function(digit){
+  if(ksExitPin.length>=6)return;
+  ksExitPin+=digit;
+  ksExitUpdateDots();
+  // Auto verify when enough digits entered (match pin length)
+  var expectedLen=ksBiz&&ksBiz.kioskPin?ksBiz.kioskPin.length:4;
+  if(ksExitPin.length>=expectedLen) ksVerifyExit();
+};
+window.ksExitBackspace=function(){
+  if(!ksExitPin.length)return;
+  ksExitPin=ksExitPin.slice(0,-1);
+  ksExitUpdateDots();
+  document.getElementById('ks-exit-error').textContent='';
+};
+function ksExitUpdateDots(){
+  for(var i=0;i<4;i++){
+    var dot=document.getElementById('ks-exit-d'+i);if(!dot)continue;
+    dot.classList.remove('filled','error');
+    if(i<ksExitPin.length)dot.classList.add('filled');
+  }
+}
+function ksVerifyExit(){
+  var correctPin=ksBiz&&ksBiz.kioskPin?ksBiz.kioskPin:'';
+  if(ksExitPin===correctPin){
+    // Clear kiosk session and go to landing
+    localStorage.removeItem('ap_kiosk_session');
+    localStorage.removeItem('ap_kiosk_biz_cache');
+    localStorage.removeItem('ap_kiosk_staff_cache');
+    localStorage.removeItem('ap_kiosk_settings_cache');
+    ksStopCamera();
+    if(ksCountdownTimer){clearInterval(ksCountdownTimer);ksCountdownTimer=null;}
+    ksBiz=null;ksBizId=null;ksStaffArr=[];ksSettings={};
+    document.getElementById('ks-exit-overlay').style.display='none';
+    showScreen('screen-landing');
+  } else {
+    for(var i=0;i<4;i++){var dot=document.getElementById('ks-exit-d'+i);if(dot){dot.classList.remove('filled');dot.classList.add('error');}}
+    document.getElementById('ks-exit-error').textContent='Wrong PIN. Try again.';
+    ksExitPin='';
+    setTimeout(function(){
+      for(var i=0;i<4;i++){var dot=document.getElementById('ks-exit-d'+i);if(dot)dot.classList.remove('error');}
+      document.getElementById('ks-exit-error').textContent='';
+    },900);
+  }
+}
 
 async function ksDoPunch(){
   var s=ksSelectedStaff;if(!s)return;
@@ -2511,7 +2609,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.1</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.2</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3015,6 +3113,36 @@ textarea.form-input{resize:none;}
     <div style="font-family:var(--fh);font-weight:800;font-size:16px;color:var(--accent);">AttendPro Kiosk</div>
     <div id="kiosk-biz-name" style="font-size:12px;color:var(--muted);"></div>
   </div>
+  <!-- Exit kiosk — discreet, PIN protected -->
+  <div style="text-align:center;padding:4px 0 0;">
+    <button onclick="ksShowExit()" style="background:none;border:none;font-size:11px;color:var(--border);cursor:pointer;padding:4px 12px;">⬡ Exit Kiosk</button>
+  </div>
+  <!-- Exit PIN overlay -->
+  <div id="ks-exit-overlay" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:999;padding:40px 24px;text-align:center;">
+    <div style="font-size:20px;font-weight:800;font-family:var(--fh);margin-bottom:6px;">Exit Kiosk Mode</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:20px;">Enter Kiosk PIN to exit</div>
+    <div style="display:flex;justify-content:center;gap:14px;margin-bottom:20px;">
+      <div class="kiosk-dot" id="ks-exit-d0"></div>
+      <div class="kiosk-dot" id="ks-exit-d1"></div>
+      <div class="kiosk-dot" id="ks-exit-d2"></div>
+      <div class="kiosk-dot" id="ks-exit-d3"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:280px;margin:0 auto 14px;">
+      <button class="kiosk-key" onclick="ksExitKey('1')">1</button>
+      <button class="kiosk-key" onclick="ksExitKey('2')">2</button>
+      <button class="kiosk-key" onclick="ksExitKey('3')">3</button>
+      <button class="kiosk-key" onclick="ksExitKey('4')">4</button>
+      <button class="kiosk-key" onclick="ksExitKey('5')">5</button>
+      <button class="kiosk-key" onclick="ksExitKey('6')">6</button>
+      <button class="kiosk-key" onclick="ksExitKey('7')">7</button>
+      <button class="kiosk-key" onclick="ksExitKey('8')">8</button>
+      <button class="kiosk-key" onclick="ksExitKey('9')">9</button>
+      <button class="kiosk-key" onclick="ksExitCancel()" style="font-size:13px;color:var(--muted);">Cancel</button>
+      <button class="kiosk-key" onclick="ksExitKey('0')">0</button>
+      <button class="kiosk-key" onclick="ksExitBackspace()">⌫</button>
+    </div>
+    <div id="ks-exit-error" style="color:var(--red);font-size:13px;font-weight:700;min-height:20px;"></div>
+  </div>
   <div style="padding:0 16px 24px;max-width:500px;margin:0 auto;" id="kiosk-main">
     <!-- STEP: Staff Grid -->
     <div id="ks-step-grid">
@@ -3282,7 +3410,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.1</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.2</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3290,10 +3418,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.15.1 -->
+    <!-- v1.15.2 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.1</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.2</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
