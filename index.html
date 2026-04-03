@@ -714,12 +714,10 @@ async function renderOwnerToday(){
     const now=new Date(),pastLimit=now.getHours()>lh||(now.getHours()===lh&&now.getMinutes()>lm);
     const todayDow=now.getDay();
     const active=staffArr.filter(s=>s.active);
-    // Fetch salary configs for weekly off check
+    // Fetch salary configs in parallel
     const cfgMap={};
-    for(var ci=0;ci<active.length;ci++){
-      var sc=await getSalaryCfg(active[ci].id);
-      cfgMap[active[ci].id]=sc;
-    }
+    var cfgResults=await Promise.all(active.map(function(s){return getSalaryCfg(s.id);}));
+    active.forEach(function(s,i){cfgMap[s.id]=cfgResults[i];});
     let html='<div class="card"><div class="card-title">Today — '+today+'</div>';
     if(!active.length)html+='<p style="font-size:13px;color:var(--muted)">No staff yet. Go to Staff tab.</p>';
     active.forEach(function(s){
@@ -1107,7 +1105,14 @@ window.renderReport=async function(){
     }
     if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks,weeklyOff);
     else document.getElementById('report-stats').innerHTML='';
-    const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,30);
+      var list=Object.values(recs).sort(function(a,b){
+        // Open sessions (no punch out) float to top
+        var aOpen=a.sessions?a.sessions.some(function(ss){return !ss.outTime;}):!a.outTime;
+        var bOpen=b.sessions?b.sessions.some(function(ss){return !ss.outTime;}):!b.outTime;
+        if(aOpen&&!bOpen)return -1;
+        if(!aOpen&&bOpen)return 1;
+        return (b.date||'').localeCompare(a.date||'');
+      }).slice(0,30);
     // Build a set of dates that have records for selected staff
     var dim2=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();
     var today2=todayStr();
@@ -1153,7 +1158,8 @@ window.renderReport=async function(){
         if(r.inDist!=null) sub+=' · '+r.inDist+'m';
         var selfie=sessions?sessions[0].inSelfie:r.inSelfie;
         var hasOpenSession=sessions?sessions.some(function(ss){return !ss.outTime;}):!r.outTime;
-        rhtml+='<div class="row"><div class="row-main"><div class="row-title">'+r.staffName+
+        rhtml+='<div class="row" style="'+(hasOpenSession?'border-left:3px solid var(--accent);padding-left:10px;':'')+'"><div class="row-main"><div class="row-title">'+r.staffName+
+          (hasOpenSession?' <span style="font-size:10px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.12);border:1px solid rgba(245,166,35,.3);border-radius:8px;padding:2px 6px;">⏳ No Punch Out</span>':'')+
           (r.late?' <span class="late-tag">LATE</span>':'')+(r.gpsFlag?' <span class="gps-flag-tag">⚠️ LOCATION</span>':'')+
           (r.manualEdit?' <span style="font-size:10px;color:var(--muted)">(edited)</span>':'')+
           (r.manual?' <span style="font-size:10px;color:var(--muted)">(manual)</span>':'')+
@@ -1274,14 +1280,14 @@ function defaultSalaryCfg(){return {base:0,weeklyOff:-1,startTime:'10:00',endTim
 
 async function populatePayrollDropdowns(){
   const active=staffArr.filter(s=>s.active);
-  // Build advance outstanding map for badges
+  // Build advance outstanding map — fetch ALL in parallel
   const advMap={};
   try{
-    for(var i=0;i<active.length;i++){
-      var s=active[i];
-      var ledger=await fbGet(p.advLedger(s.id)).catch(()=>null);
-      if(ledger&&ledger.balance>0) advMap[s.id]=ledger.balance;
-    }
+    var ledgerPromises=active.map(function(s){return fbGet(p.advLedger(s.id)).catch(function(){return null;});});
+    var ledgers=await Promise.all(ledgerPromises);
+    ledgers.forEach(function(ledger,i){
+      if(ledger&&ledger.balance>0) advMap[active[i].id]=ledger.balance;
+    });
   }catch(e){}
   ['pay-staff-sel','adv-staff-sel'].forEach(function(id){
     const el=document.getElementById(id);if(!el)return;
@@ -2760,7 +2766,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.6</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.8</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3565,7 +3571,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.6</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.8</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3573,10 +3579,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.15.6 -->
+    <!-- v1.15.8 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.6</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.8</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
