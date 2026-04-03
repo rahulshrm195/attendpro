@@ -1082,15 +1082,23 @@ window.renderReport=async function(){
   document.getElementById('report-month-lbl').textContent=d.toLocaleString('default',{month:'long',year:'numeric'});
   setLoading(true,'Loading report…');
   try{
-    const prefix=`${d.getFullYear()}-${pad(d.getMonth()+1)}`;
-    let recsAll=sid==='all'
-      ? await fbList(p.recs(),where('date','>=',prefix+'-01'),where('date','<=',prefix+'-31'))
-      : await fbList(p.recs(),where('staffId','==',sid),where('date','>=',prefix+'-01'),where('date','<=',prefix+'-31'));
-    const recs={};recsAll.forEach(r=>recs[r.staffId+'_'+r.date]=r);
-    const marksAll=await fbList(p.days());
-    const marks={};marksAll.filter(m=>m.date?.startsWith(prefix)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
+    const prefix=d.getFullYear()+'-'+pad(d.getMonth()+1);
+    // ── Fetch all three in parallel ──
+    var recsPromise=sid==='all'
+      ? fbList(p.recs(),where('date','>=',prefix+'-01'),where('date','<=',prefix+'-31'))
+      : fbList(p.recs(),where('staffId','==',sid),where('date','>=',prefix+'-01'),where('date','<=',prefix+'-31'));
+    // Cache marks per prefix — holidays don't change every load
+    if(!window._marksCache) window._marksCache={};
+    var marksPromise=window._marksCache[prefix]
+      ? Promise.resolve(window._marksCache[prefix])
+      : fbList(p.days()).then(function(all){window._marksCache[prefix]=all;return all;});
+    var cfgPromise=sid!=='all'?getSalaryCfg(sid):Promise.resolve(null);
+    var results=await Promise.all([recsPromise,marksPromise,cfgPromise]);
+    var recsAll=results[0],marksAll=results[1],cfg=results[2];
+    const recs={};recsAll.forEach(function(r){recs[r.staffId+'_'+r.date]=r;});
+    const marks={};marksAll.filter(function(m){return m.date&&m.date.startsWith(prefix);}).forEach(function(m){marks[m.date+(m.staffId?'_'+m.staffId:'')]=m;});
     var weeklyOff=-1;
-    if(sid!=='all'){var cfg=await getSalaryCfg(sid);weeklyOff=cfg.weeklyOff>=0?cfg.weeklyOff:-1;}
+    if(cfg) weeklyOff=cfg.weeklyOff>=0?cfg.weeklyOff:-1;
     drawCal('report-cal',d.getFullYear(),d.getMonth(),sid==='all'?null:sid,recs,marks,weeklyOff);
     const calLabel=document.getElementById('report-cal-label');
     if(calLabel){
@@ -1251,9 +1259,17 @@ window.exportAttendancePDF=async function(){
   setLoading(false);
 };
 async function getSalaryCfg(sid){
-  try{const cfg=await fbGet(p.salary(sid));return cfg||defaultSalaryCfg();}
+  if(!getSalaryCfg._cache) getSalaryCfg._cache={};
+  if(getSalaryCfg._cache[sid]) return getSalaryCfg._cache[sid];
+  try{
+    const cfg=await fbGet(p.salary(sid));
+    var result=cfg||defaultSalaryCfg();
+    getSalaryCfg._cache[sid]=result;
+    return result;
+  }
   catch{return ls.get('ap_salary_'+sid,defaultSalaryCfg());}
 }
+window.clearSalaryCache=function(sid){if(getSalaryCfg._cache)delete getSalaryCfg._cache[sid];};
 function defaultSalaryCfg(){return {base:0,weeklyOff:-1,startTime:'10:00',endTime:'21:00',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3};}
 
 async function populatePayrollDropdowns(){
@@ -1748,6 +1764,7 @@ window.saveSalarySettings=async function(){
   try{
     await fbSet(p.salary(editingSalaryStaffId),cfg);
     ls.set('ap_salary_'+editingSalaryStaffId,cfg);
+    clearSalaryCache(editingSalaryStaffId); // clear in-memory cache
     const s=staffArr.find(x=>x.id===editingSalaryStaffId);
     if(s){s._startTime=cfg.startTime;ls.set('ap_staff_cache',staffArr);}
     closeSheet('sheet-salary');
@@ -1862,7 +1879,12 @@ window.markDay=async function(){
   const date=v('mark-date'),type=v('mark-type'),note=v('mark-note'),sid=v('mark-staff-sel');
   if(!date)return toast('Select date',true);
   const data={type,note,date};if(type==='leave')data.staffId=sid;
-  try{await fbSet(p.day(date,type==='leave'?sid:null),data);toast(`✓ ${date} marked`);document.getElementById('mark-note').value='';}
+  try{
+    await fbSet(p.day(date,type==='leave'?sid:null),data);
+    // Clear marks cache so report reflects new mark immediately
+    if(window._marksCache){var mp=date.slice(0,7);delete window._marksCache[mp];}
+    toast(`✓ ${date} marked`);document.getElementById('mark-note').value='';
+  }
   catch(e){toast('Error: '+e.message,true);}
 };
 window.manualEntry=async function(){
@@ -2719,7 +2741,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.4</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.5</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3524,7 +3546,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.4</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.5</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3532,10 +3554,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.15.4 -->
+    <!-- v1.15.5 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.4</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.5</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
