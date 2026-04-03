@@ -776,6 +776,8 @@ window.openEditPunch=async function(staffId,date){
       picker.style.display='block';
       timeInputs.style.display='none';
       document.getElementById('edit-punch-session').value='';
+      document.getElementById('edit-punch-title').textContent='Edit Attendance';
+      document.getElementById('edit-back-link').style.display='none';
       var listEl=document.getElementById('edit-session-list');
       listEl.innerHTML=sessions.map(function(sess,idx){
         var inT=sess.inTime||'—';
@@ -809,8 +811,23 @@ window.openEditPunch=async function(staffId,date){
   setLoading(false);
 };
 
+window.openAddEntry=function(staffId,date){
+  var staffName=staffArr.find(function(s){return s.id===staffId;});
+  staffName=staffName?staffName.name:staffId;
+  document.getElementById('edit-punch-staffid').value=staffId;
+  document.getElementById('edit-punch-date').value=date;
+  document.getElementById('edit-punch-session').value='-2'; // -2 = new record
+  document.getElementById('edit-punch-sub').textContent=staffName+' · '+date+' · New Entry';
+  document.getElementById('edit-punch-title').textContent='Add Entry';
+  document.getElementById('edit-session-picker').style.display='none';
+  document.getElementById('edit-time-inputs').style.display='block';
+  document.getElementById('edit-back-link').style.display='none';
+  document.getElementById('edit-punch-in').value='';
+  document.getElementById('edit-punch-out').value='';
+  openSheet('sheet-edit-punch');
+};
+
 window.editPickSession=async function(idx){
-  // Called when owner taps a session in the picker
   var staffId=document.getElementById('edit-punch-staffid').value;
   var date=document.getElementById('edit-punch-date').value;
   var rec=await fbGet(p.rec(staffId,date)).catch(function(){return null;});
@@ -819,8 +836,27 @@ window.editPickSession=async function(idx){
   document.getElementById('edit-punch-session').value=String(idx);
   document.getElementById('edit-punch-in').value=to24hr(sess.inTime||'');
   document.getElementById('edit-punch-out').value=sess.outTime?to24hr(sess.outTime):'';
+  document.getElementById('edit-punch-title').textContent='Edit Session '+(idx+1);
   document.getElementById('edit-session-picker').style.display='none';
   document.getElementById('edit-time-inputs').style.display='block';
+  document.getElementById('edit-back-link').style.display='block';
+};
+
+window.editAddNewSession=function(){
+  document.getElementById('edit-punch-session').value='-3'; // -3 = add new session
+  document.getElementById('edit-punch-title').textContent='Add New Session';
+  document.getElementById('edit-punch-in').value='';
+  document.getElementById('edit-punch-out').value='';
+  document.getElementById('edit-session-picker').style.display='none';
+  document.getElementById('edit-time-inputs').style.display='block';
+  document.getElementById('edit-back-link').style.display='block';
+};
+
+window.editBackToSessions=function(){
+  document.getElementById('edit-punch-title').textContent='Edit Attendance';
+  document.getElementById('edit-session-picker').style.display='block';
+  document.getElementById('edit-time-inputs').style.display='none';
+  document.getElementById('edit-back-link').style.display='none';
 };
 
 function to24hr(timeStr){
@@ -860,9 +896,53 @@ window.saveEditPunch=async function(){
   setLoading(true,'Saving…');
   try{
     var rec=await fbGet(p.rec(staffId,date)).catch(function(){return null;});
-    if(!rec){toast('No attendance record found',true);setLoading(false);return;}
     var staffName=staffArr.find(function(s){return s.id===staffId;});
     staffName=staffName?staffName.name:staffId;
+    if(sessionIdx===-2){
+      // ── Create brand new record ──
+      var newRec={
+        staffId:staffId,staffName:staffName,date:date,
+        inTime:inTime12,inISO:inISO,
+        outTime:outTime12,outISO:outISO,
+        workedMins:workedMins,workedDisplay:workedDisplay,
+        sessions:[{inTime:inTime12,inISO:inISO,outTime:outTime12,outISO:outISO,workedMins:workedMins,workedDisplay:workedDisplay}],
+        manual:true,manualEdit:true,
+        _updatedAt:serverTimestamp()
+      };
+      var lh=parseInt((settings.punchInTime||'10:00').split(':')[0]);
+      var lm2=parseInt((settings.punchInTime||'10:00').split(':')[1]);
+      var inH=parseInt(inVal.split(':')[0]),inM=parseInt(inVal.split(':')[1]);
+      newRec.late=(inH>lh||(inH===lh&&inM>lm2));
+      await fbSet(p.rec(staffId,date),newRec);
+      closeSheet('sheet-edit-punch');
+      toast('✓ Entry added for '+staffName);
+      renderOwnerToday();renderReport();
+      setLoading(false);return;
+    }
+    if(sessionIdx===-3){
+      // ── Add new session to existing record ──
+      if(!rec){toast('No attendance record found',true);setLoading(false);return;}
+      var sessions3=rec.sessions&&rec.sessions.length?rec.sessions.slice():[];
+      var newSess={inTime:inTime12,inISO:inISO,outTime:outTime12,outISO:outISO,workedMins:workedMins,workedDisplay:workedDisplay,manual:true};
+      sessions3.push(newSess);
+      var totalMins3=sessions3.reduce(function(s,ss){return s+(ss.workedMins||0);},0);
+      var th3=Math.floor(totalMins3/60),tm3=totalMins3%60;
+      var lastSess3=sessions3[sessions3.length-1];
+      await updateDoc(doc(db,p.rec(staffId,date)),{
+        sessions:sessions3,
+        inTime:sessions3[0].inTime,
+        outTime:lastSess3.outTime||'',
+        workedMins:totalMins3,
+        workedDisplay:th3+'h '+tm3+'m',
+        manualEdit:true,
+        _updatedAt:serverTimestamp()
+      });
+      closeSheet('sheet-edit-punch');
+      toast('✓ Session added for '+staffName);
+      renderOwnerToday();renderReport();
+      setLoading(false);return;
+    }
+    if(!rec){toast('No attendance record found',true);setLoading(false);return;}
     var sessions=rec.sessions&&rec.sessions.length?rec.sessions.slice():null;
     if(sessions&&sessions.length>0&&sessionIdx>=0){
       // Edit the specific session by index
@@ -1020,10 +1100,40 @@ window.renderReport=async function(){
     if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks,weeklyOff);
     else document.getElementById('report-stats').innerHTML='';
     const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,30);
-    if(!list.length){
+    // Build a set of dates that have records for selected staff
+    var dim2=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();
+    var today2=todayStr();
+    var missingDays=[];
+    if(sid!=='all'){
+      for(var dd=1;dd<=dim2;dd++){
+        var ds=d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(dd);
+        if(ds>today2) break; // don't show future days
+        if(!recs[sid+'_'+ds]){
+          // Check if it's a weekly off or holiday
+          var dow2=new Date(d.getFullYear(),d.getMonth(),dd).getDay();
+          var mark2=marks[ds]||(marks[ds+'_'+sid]);
+          var isWoff=weeklyOff>=0&&dow2===weeklyOff;
+          var isHol=mark2&&(mark2.type==='holiday'||mark2.type==='leave');
+          if(!isWoff&&!isHol) missingDays.push(ds);
+        }
+      }
+    }
+    if(!list.length && !missingDays.length){
       document.getElementById('report-log').innerHTML='<div class="empty-state"><div class="emoji">📅</div>No records</div>';
     } else {
       var rhtml='';
+      // Show missing days first (most recent first) with Add Entry button
+      if(missingDays.length&&sid!=='all'){
+        rhtml+='<div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;letter-spacing:.5px;">MISSING ENTRIES</div>';
+        missingDays.slice().reverse().forEach(function(ds){
+          var sf2=staffArr.find(function(s){return s.id===sid;});
+          rhtml+='<div class="row" style="opacity:0.7;"><div class="row-main"><div class="row-title">'+(sf2?sf2.name:sid)+'</div>'
+            +'<div class="row-sub">'+ds+' · No punch record</div></div>'
+            +'<button class="btn btn-ghost btn-xs" style="color:var(--green);border-color:var(--green);font-size:11px;padding:4px 8px;white-space:nowrap;" onclick="openAddEntry(\''+sid+'\',\''+ds+'\')">+ Add</button>'
+            +'</div>';
+        });
+        rhtml+='<div style="font-size:11px;font-weight:700;color:var(--muted);margin:12px 0 6px;letter-spacing:.5px;">EXISTING RECORDS</div>';
+      }
       for(var ri=0;ri<list.length;ri++){
         var r=list[ri];
         var sessions=r.sessions&&r.sessions.length?r.sessions:null;
@@ -2609,7 +2719,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.2</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.4</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3256,7 +3366,7 @@ textarea.form-input{resize:none;}
 <div class="sheet-overlay" id="sheet-edit-punch">
   <div class="sheet">
     <div class="sheet-handle"></div>
-    <div class="sheet-title">Edit Attendance</div>
+    <div class="sheet-title" id="edit-punch-title">Edit Attendance</div>
     <div class="sheet-sub" id="edit-punch-sub">Editing punch for staff</div>
     <input type="hidden" id="edit-punch-staffid">
     <input type="hidden" id="edit-punch-date">
@@ -3265,9 +3375,13 @@ textarea.form-input{resize:none;}
     <div id="edit-session-picker" style="display:none;margin-bottom:14px;">
       <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:8px;">SELECT SESSION TO EDIT</div>
       <div id="edit-session-list"></div>
+      <button class="btn btn-ghost btn-sm" onclick="editAddNewSession()" style="width:100%;margin-top:4px;border-style:dashed;color:var(--green);border-color:var(--green);">+ Add New Session</button>
     </div>
     <!-- Time inputs -->
     <div id="edit-time-inputs">
+      <div id="edit-back-link" style="display:none;margin-bottom:12px;">
+        <button onclick="editBackToSessions()" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:0;">← Back to sessions</button>
+      </div>
       <div class="two-col">
         <div class="form-group">
           <label class="form-label">Punch In Time</label>
@@ -3280,7 +3394,7 @@ textarea.form-input{resize:none;}
       </div>
       <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Leave punch-out blank if staff is still in.</div>
       <div style="display:flex;gap:10px;">
-        <button class="btn btn-primary" onclick="saveEditPunch()">✓ Save Changes</button>
+        <button class="btn btn-primary" onclick="saveEditPunch()">✓ Save</button>
         <button class="btn btn-secondary" onclick="closeSheet('sheet-edit-punch')">Cancel</button>
       </div>
     </div>
@@ -3410,7 +3524,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.2</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.4</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3418,10 +3532,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.15.2 -->
+    <!-- v1.15.4 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.2</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.4</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
