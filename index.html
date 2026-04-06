@@ -1287,7 +1287,7 @@ async function getSalaryCfg(sid){
   catch{return ls.get('ap_salary_'+sid,defaultSalaryCfg());}
 }
 window.clearSalaryCache=function(sid){if(getSalaryCfg._cache)delete getSalaryCfg._cache[sid];};
-function defaultSalaryCfg(){return {base:0,weeklyOff:-1,startTime:'10:00',endTime:'21:00',standardHours:0,minHours:1,otRateMode:'none',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3};}
+function defaultSalaryCfg(){return {base:0,weeklyOff:-1,startTime:'10:00',endTime:'21:00',standardHours:0,minHours:1,otRateMode:'none',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3,showWoPay:false};}
 function calcAutoStdHoursFromCfg(cfg){
   var s=(cfg.startTime||'10:00').split(':').map(Number);
   var e=(cfg.endTime||'21:00').split(':').map(Number);
@@ -1390,7 +1390,7 @@ window.renderPayroll=async function(){
 
     var workDays=0,present=0,absent=0,late=0,offDays=0;
     var totalWorkedMins=0,shortMins=0,shortDays=0,otMins=0;
-    var weeklyOffWorkedMins=0,weeklyOffWorked=0;
+    var weeklyOffWorkedMins=0,weeklyOffWorked=0,weeklyOffPaidDays=0;
 
     for(var i=1;i<=upto;i++){
       const ds=year+'-'+pad(month+1)+'-'+pad(i);
@@ -1401,6 +1401,7 @@ window.renderPayroll=async function(){
       // Weekly off
       if(cfg.weeklyOff>=0&&dow==cfg.weeklyOff){
         offDays++;
+        weeklyOffPaidDays++; // count every weekly off day (paid)
         if(rec&&rec.inTime){
           weeklyOffWorked++;
           var wMins=rec.workedMins||0;
@@ -1470,8 +1471,11 @@ window.renderPayroll=async function(){
     var otPay=Math.round((otMins/60)*otRatePerHour);
     var otH=Math.floor(otMins/60),otM2=otMins%60;
 
-    // Weekly off bonus
+    // Weekly off bonus (worked on off day)
     var weeklyOffBonus=stdMins>0?Math.round((weeklyOffWorkedMins/stdMins)*perDay*weeklyOffWorked):0;
+
+    // Weekly Off Paid Days — shown separately if showWoPay enabled
+    var woPay=cfg.showWoPay?weeklyOffPaidDays*perDay:0;
 
     // Late deduction — stays as separate rule (Option A agreed)
     var lateD=0;
@@ -1512,7 +1516,7 @@ window.renderPayroll=async function(){
     }
 
     const advRecover=Math.min(parseInt(advInput&&advInput.value)||0, totalOutstanding);
-    const netBeforeAdv=Math.max(0,basePay+otPay+incentive+weeklyOffBonus-lateD);
+    const netBeforeAdv=Math.max(0,basePay+otPay+incentive+weeklyOffBonus+woPay-lateD);
     const advActual=Math.min(advRecover,netBeforeAdv);
     const net=Math.max(0,netBeforeAdv-advActual);
     const advCarryFwd=totalOutstanding-advActual;
@@ -1550,6 +1554,16 @@ window.renderPayroll=async function(){
     R('pb-woff-lbl','Weekly Off Worked ('+woffHrs+'h '+woffMin+'m prorated)');
     var woffRow=document.getElementById('pb-woff-row');
     if(woffRow)woffRow.style.display=weeklyOffWorked>0?'flex':'none';
+
+    // Weekly Off Pay — separate line if enabled
+    var woPayRow=document.getElementById('pb-wopay-row');
+    if(woPayRow){
+      if(cfg.showWoPay&&weeklyOffPaidDays>0){
+        woPayRow.style.display='flex';
+        R('pb-wopay-lbl','Weekly Off Pay ('+weeklyOffPaidDays+' day'+(weeklyOffPaidDays>1?'s':'')+' × ₹'+perDay+')');
+        R('pb-wopay','+₹'+woPay.toLocaleString('en-IN'));
+      } else woPayRow.style.display='none';
+    }
 
     // Absent — informational only, no deduction
     R('pb-absent-lbl','Absent ('+absent+' day'+(absent!==1?'s':'')+') — unpaid via base');
@@ -1852,6 +1866,10 @@ window.openSalarySettings=async function(staffId){
   setLoading(false);
   document.getElementById('ss-base').value=cfg.base||0;
   document.getElementById('ss-weeklyoff').value=cfg.weeklyOff!=null?cfg.weeklyOff:-1;
+  // Show/hide WO pay option based on whether weekly off is set
+  var woWrap=document.getElementById('ss-wopay-wrap');
+  if(woWrap)woWrap.style.display=(cfg.weeklyOff>=0)?'block':'none';
+  document.getElementById('ss-showwopay').checked=cfg.showWoPay||false;
   document.getElementById('ss-start').value=cfg.startTime||'10:00';
   document.getElementById('ss-end').value=cfg.endTime||'21:00';
   // Standard hours — auto calculate from shift if not set
@@ -1914,6 +1932,7 @@ window.saveSalarySettings=async function(){
     minHours:parseFloat(v('ss-minhours'))||1,
     otRateMode:otRateMode,
     otRate:otRate,
+    showWoPay:document.getElementById('ss-showwopay')?.checked||false,
     lateRule:v('ss-laterule'),
     lateAmount:parseInt(v('ss-lateamt'))||0,
     lateHalfAfter:parseInt(v('ss-lateafter'))||3
@@ -2469,6 +2488,8 @@ window.printSalarySlip=function(){
     html+='<tr><td>'+g('pb-ot-lbl')+'</td><td class="r g">'+g('pb-ot')+'</td></tr>';
     html+='<tr><td>Sales Incentive</td><td class="r g">'+g('pb-incentive')+'</td></tr>';
     if(woffRowVis) html+='<tr><td>'+g('pb-woff-lbl')+'</td><td class="r g">'+g('pb-woff-bonus')+'</td></tr>';
+    var woPayRowVis=document.getElementById('pb-wopay-row')&&document.getElementById('pb-wopay-row').style.display!=='none';
+    if(woPayRowVis) html+='<tr><td>'+g('pb-wopay-lbl')+'</td><td class="r g">'+g('pb-wopay')+'</td></tr>';
     if(shortRowVis) html+='<tr><td>'+g('pb-short-lbl')+'</td><td class="r" style="color:#888;">'+g('pb-short')+'</td></tr>';
     html+='<tr><td>'+g('pb-absent-lbl')+'</td><td class="r" style="color:#888;">'+g('pb-absent')+'</td></tr>';
     html+='<tr><td>'+g('pb-late-lbl')+'</td><td class="r re">'+g('pb-late')+'</td></tr>';
@@ -2943,7 +2964,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.16.3</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.16.4</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3255,6 +3276,7 @@ textarea.form-input{resize:none;}
           <div class="pay-row"><span class="pay-row-lbl" id="pb-ot-lbl">Overtime (0 hrs)</span><span class="pay-row-val" style="color:var(--green);" id="pb-ot">+₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl">Sales Incentive</span><span class="pay-row-val" style="color:var(--green);" id="pb-incentive">+₹0</span></div>
           <div class="pay-row" id="pb-woff-row" style="display:none;"><span class="pay-row-lbl" id="pb-woff-lbl">Weekly Off Worked</span><span class="pay-row-val" style="color:var(--green);" id="pb-woff-bonus">+₹0</span></div>
+          <div class="pay-row" id="pb-wopay-row" style="display:none;"><span class="pay-row-lbl" id="pb-wopay-lbl">Weekly Off Pay</span><span class="pay-row-val" style="color:var(--green);" id="pb-wopay">+₹0</span></div>
           <div class="pay-section">Deductions</div>
           <div class="pay-row" id="pb-short-row" style="display:none;"><span class="pay-row-lbl" id="pb-short-lbl">Short Hours</span><span class="pay-row-val" style="color:#a855f7;" id="pb-short">−₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl" id="pb-absent-lbl">Absent (0 days)</span><span class="pay-row-val" style="color:var(--red);" id="pb-absent">−₹0</span></div>
@@ -3655,13 +3677,19 @@ textarea.form-input{resize:none;}
     <div class="form-group"><label class="form-label">Monthly Base Salary (₹)</label><input type="number" class="form-input" id="ss-base" min="0"></div>
     <div class="two-col">
       <div class="form-group"><label class="form-label">Weekly Off Day</label>
-        <select class="form-input form-select" id="ss-weeklyoff">
+        <select class="form-input form-select" id="ss-weeklyoff" onchange="var w=document.getElementById('ss-wopay-wrap');if(w)w.style.display=this.value>=0?'block':'none'">
           <option value="-1">No Weekly Off (works all 7 days)</option>
           <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
           <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
           <option value="6">Saturday</option>
         </select></div>
       <div class="form-group"><label class="form-label">Shift Start</label><input type="time" class="form-input" id="ss-start" onchange="updateAutoStdHours()"></div>
+    </div>
+    <div id="ss-wopay-wrap" style="display:none;margin-bottom:14px;">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="ss-showwopay" style="width:18px;height:18px;accent-color:var(--accent);">
+        <span style="font-size:13px;font-weight:600;">Show Weekly Off Pay as separate line in payroll<br><span style="font-size:11px;color:var(--muted);font-weight:400;">Staff sees paid weekly offs clearly (e.g. 4 Mondays × ₹333)</span></span>
+      </label>
     </div>
     <div class="two-col">
       <div class="form-group"><label class="form-label">Shift End</label><input type="time" class="form-input" id="ss-end" onchange="updateAutoStdHours()"></div>
@@ -3761,7 +3789,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.16.3</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.16.4</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3769,10 +3797,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.16.3 -->
+    <!-- v1.16.4 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.16.3</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.16.4</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
