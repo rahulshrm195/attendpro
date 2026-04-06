@@ -1428,8 +1428,10 @@ window.renderPayroll=async function(){
         } else {
           present++;
           if(rec.late) late++;
-          totalWorkedMins+=dayMins;
-          // Short hours check
+          // Cap base hours at standard — OT is separate
+          var baseContrib=Math.min(dayMins,stdMins);
+          totalWorkedMins+=baseContrib;
+          // Short hours — informational only (already reflected in lower base pay)
           if(dayMins<stdMins){
             shortDays++;
             shortMins+=(stdMins-dayMins);
@@ -1444,37 +1446,34 @@ window.renderPayroll=async function(){
 
     // ── Payroll calculations ──
     const perDay=Math.round(cfg.base/30);
-    const perMin=cfg.base/30/stdMins; // per minute rate
 
-    // Base pay — earned hours based
+    // Base pay = actual hours worked (capped at std per day) ÷ std hours × per day rate
+    // Absent days contribute 0 hours — no separate absent deduction needed
+    // Short days contribute their actual hours — no separate short deduction needed
     var eligibleDays=upto;
     if(joiningDate&&joiningDate.startsWith(prefix)){
       var joinDay=parseInt(joiningDate.split('-')[2])||1;
       eligibleDays=upto-joinDay+1;
     }
-    // Gross earned = present days at full rate minus proportional short deduction
-    var earnedMins=totalWorkedMins;
-    var maxEarnedMins=present*stdMins; // what they could have earned
-    // basePay = (earned mins / std mins per day) * perDay
-    var basePay=Math.round((earnedMins/stdMins)*perDay);
-    // Cap at eligible days worth
+    var basePay=stdMins>0?Math.round((totalWorkedMins/stdMins)*perDay):0;
+    // Cap at eligible days worth of salary
     var maxPay=eligibleDays<upto?perDay*eligibleDays:cfg.base;
     basePay=Math.min(basePay,maxPay);
 
-    // Short hours deduction (already baked into basePay via earnedMins, but show separately)
-    var shortDed=Math.round(shortMins*perMin);
+    // Short hours — informational only, no deduction
+    var shortDed=0;
 
-    // Absent deduction
-    var absentD=Math.round(absent*perDay);
+    // Absent — informational only, no separate deduction (already 0hrs in base)
+    var absentD=0;
 
-    // OT pay
+    // OT pay — hours beyond standard per day × OT rate
     var otPay=Math.round((otMins/60)*otRatePerHour);
     var otH=Math.floor(otMins/60),otM2=otMins%60;
 
     // Weekly off bonus
     var weeklyOffBonus=stdMins>0?Math.round((weeklyOffWorkedMins/stdMins)*perDay*weeklyOffWorked):0;
 
-    // Late deduction
+    // Late deduction — stays as separate rule (Option A agreed)
     var lateD=0;
     if(cfg.lateRule==='fixed') lateD=late*(cfg.lateAmount||0);
     else if(cfg.lateRule==='halfday') lateD=Math.floor(late/(cfg.lateHalfAfter||3))*Math.round(perDay/2);
@@ -1513,7 +1512,7 @@ window.renderPayroll=async function(){
     }
 
     const advRecover=Math.min(parseInt(advInput&&advInput.value)||0, totalOutstanding);
-    const netBeforeAdv=Math.max(0,basePay+otPay+incentive+weeklyOffBonus-absentD-lateD);
+    const netBeforeAdv=Math.max(0,basePay+otPay+incentive+weeklyOffBonus-lateD);
     const advActual=Math.min(advRecover,netBeforeAdv);
     const net=Math.max(0,netBeforeAdv-advActual);
     const advCarryFwd=totalOutstanding-advActual;
@@ -1521,22 +1520,24 @@ window.renderPayroll=async function(){
     const R=function(id,val){const el=document.getElementById(id);if(el)el.textContent=val;};
     R('pay-net-amount','₹'+net.toLocaleString('en-IN'));R('pb-net','₹'+net.toLocaleString('en-IN'));
 
-    // Base salary label — show hours earned
+    // Base salary label — show hours earned (capped at std)
     var pbBaseLbl=document.getElementById('pb-base-lbl');
     if(pbBaseLbl){
-      var earnedH=Math.floor(earnedMins/60),earnedM2=earnedMins%60;
-      pbBaseLbl.textContent='Base Salary ('+earnedH+'h '+earnedM2+'m earned)';
+      var earnedH=Math.floor(totalWorkedMins/60),earnedM2=totalWorkedMins%60;
+      pbBaseLbl.textContent='Base Salary ('+earnedH+'h '+earnedM2+'m @ ₹'+Math.round(perDay/stdHours)+'/hr)';
     }
     R('pb-base','₹'+basePay.toLocaleString('en-IN'));
 
-    // Short hours row
+    // Short hours — show as informational, ₹0 impact
     var shortRow=document.getElementById('pb-short-row');
     if(shortRow){
       if(shortDays>0){
         shortRow.style.display='flex';
         var shH=Math.floor(shortMins/60),shM=shortMins%60;
-        R('pb-short-lbl','Short Hours ('+shortDays+' day'+(shortDays>1?'s':'')+' · '+shH+'h '+shM+'m short)');
-        R('pb-short','−₹'+shortDed.toLocaleString('en-IN'));
+        R('pb-short-lbl','Short Hours ('+shortDays+' day'+(shortDays>1?'s':'')+' · '+shH+'h '+shM+'m) — already in base');
+        R('pb-short','₹0');
+        var pbShortEl=document.getElementById('pb-short');
+        if(pbShortEl)pbShortEl.style.color='var(--muted)';
       } else shortRow.style.display='none';
     }
 
@@ -1550,7 +1551,12 @@ window.renderPayroll=async function(){
     var woffRow=document.getElementById('pb-woff-row');
     if(woffRow)woffRow.style.display=weeklyOffWorked>0?'flex':'none';
 
-    R('pb-absent-lbl','Absent ('+absent+' × ₹'+perDay+')');R('pb-absent','−₹'+absentD.toLocaleString('en-IN'));
+    // Absent — informational only, no deduction
+    R('pb-absent-lbl','Absent ('+absent+' day'+(absent!==1?'s':'')+') — unpaid via base');
+    R('pb-absent','₹0');
+    var pbAbsentEl=document.getElementById('pb-absent');
+    if(pbAbsentEl)pbAbsentEl.style.color='var(--muted)';
+
     R('pb-late-lbl','Late ('+late+(cfg.lateRule==='fixed'?' × ₹'+cfg.lateAmount:'')+')');R('pb-late','−₹'+lateD.toLocaleString('en-IN'));
     R('pb-advance','−₹'+advActual.toLocaleString('en-IN'));
     if(advCarryFwd>0) R('pb-adv-carry','⚠️ ₹'+advCarryFwd.toLocaleString('en-IN')+' carries forward');
@@ -2930,7 +2936,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.16.1</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.16.2</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3748,7 +3754,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.16.1</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.16.2</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3756,10 +3762,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.16.1 -->
+    <!-- v1.16.2 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.16.1</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.16.2</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
