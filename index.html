@@ -608,8 +608,10 @@ async function renderMyHistory(){
     const marks={}; marksAll.filter(m=>m.date?.startsWith(prefix)&&(!m.staffId||m.staffId===currentStaff.id)).forEach(m=>marks[m.date+(m.staffId?'_'+m.staffId:'')]=m);
     var myCfg=await getSalaryCfg(currentStaff.id);
     var myWeeklyOff=myCfg.weeklyOff>=0?myCfg.weeklyOff:-1;
-    drawCal('my-cal',d.getFullYear(),d.getMonth(),currentStaff.id,recs,marks,myWeeklyOff);
-    drawStats('my-stats',currentStaff.id,d.getFullYear(),d.getMonth(),recs,marks,myWeeklyOff);
+    var myStdH=myCfg.standardHours||calcAutoStdHoursFromCfg(myCfg);
+    var myMinH=myCfg.minHours||1;
+    drawCal('my-cal',d.getFullYear(),d.getMonth(),currentStaff.id,recs,marks,myWeeklyOff,myStdH,myMinH);
+    drawStats('my-stats',currentStaff.id,d.getFullYear(),d.getMonth(),recs,marks,myWeeklyOff,myStdH,myMinH);
     const list=Object.values(recs).sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,20);
     if(!list.length){
       document.getElementById('my-log').innerHTML='<div class="empty-state"><div class="emoji">📅</div>No records</div>';
@@ -1096,14 +1098,15 @@ window.renderReport=async function(){
     const recs={};recsAll.forEach(function(r){recs[r.staffId+'_'+r.date]=r;});
     const marks={};marksAll.filter(function(m){return m.date&&m.date.startsWith(prefix);}).forEach(function(m){marks[m.date+(m.staffId?'_'+m.staffId:'')]=m;});
     var weeklyOff=-1;
-    if(cfg) weeklyOff=cfg.weeklyOff>=0?cfg.weeklyOff:-1;
-    drawCal('report-cal',d.getFullYear(),d.getMonth(),sid==='all'?null:sid,recs,marks,weeklyOff);
+    var stdHoursR=0,minHoursR=1;
+    if(cfg){weeklyOff=cfg.weeklyOff>=0?cfg.weeklyOff:-1;stdHoursR=cfg.standardHours||calcAutoStdHoursFromCfg(cfg);minHoursR=cfg.minHours||1;}
+    drawCal('report-cal',d.getFullYear(),d.getMonth(),sid==='all'?null:sid,recs,marks,weeklyOff,stdHoursR,minHoursR);
     const calLabel=document.getElementById('report-cal-label');
     if(calLabel){
       if(sid==='all') calLabel.textContent='Showing: All Staff combined (green = at least 1 staff present)';
       else{var sf=staffArr.find(function(s){return s.id===sid;});calLabel.textContent='Showing: '+(sf?sf.name:sid);}
     }
-    if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks,weeklyOff);
+    if(sid!=='all')drawStats('report-stats',sid,d.getFullYear(),d.getMonth(),recs,marks,weeklyOff,stdHoursR,minHoursR);
     else document.getElementById('report-stats').innerHTML='';
       var list=Object.values(recs).sort(function(a,b){
         // Open sessions (no punch out) float to top
@@ -1276,7 +1279,13 @@ async function getSalaryCfg(sid){
   catch{return ls.get('ap_salary_'+sid,defaultSalaryCfg());}
 }
 window.clearSalaryCache=function(sid){if(getSalaryCfg._cache)delete getSalaryCfg._cache[sid];};
-function defaultSalaryCfg(){return {base:0,weeklyOff:-1,startTime:'10:00',endTime:'21:00',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3};}
+function defaultSalaryCfg(){return {base:0,weeklyOff:-1,startTime:'10:00',endTime:'21:00',standardHours:0,minHours:1,otRateMode:'none',otRate:0,lateRule:'fixed',lateAmount:50,lateHalfAfter:3};}
+function calcAutoStdHoursFromCfg(cfg){
+  var s=(cfg.startTime||'10:00').split(':').map(Number);
+  var e=(cfg.endTime||'21:00').split(':').map(Number);
+  var mins=(e[0]*60+e[1])-(s[0]*60+s[1]);
+  return Math.max(1,Math.round(mins/60*2)/2);
+}
 
 async function populatePayrollDropdowns(){
   const active=staffArr.filter(s=>s.active);
@@ -1360,49 +1369,108 @@ window.renderPayroll=async function(){
     const upto=isCur?now.getDate():dim;
     const [startH,startM]=cfg.startTime.split(':').map(Number);
     const [endH,endM]=cfg.endTime.split(':').map(Number);
-    const standardMins=(endH*60+endM)-(startH*60+startM);
-    var workDays=0,present=0,absent=0,late=0,offDays=0,otMins=0,weeklyOffMins=0,weeklyOffWorked=0;
+    const shiftMins=(endH*60+endM)-(startH*60+startM);
+    // Standard hours — owner can override, default = full shift
+    var stdHours=cfg.standardHours||calcAutoStdHoursFromCfg(cfg);
+    var stdMins=Math.round(stdHours*60);
+    var minMins=Math.round((cfg.minHours||1)*60); // min to count as present
+    // OT rate — resolve based on mode
+    var otRatePerHour=0;
+    if(cfg.otRateMode==='auto') otRatePerHour=stdMins>0?Math.round(cfg.base/30/stdHours):0;
+    else if(cfg.otRateMode==='manual') otRatePerHour=cfg.otRate||0;
+    else otRatePerHour=cfg.otRate||0; // legacy / none
+
+    var workDays=0,present=0,absent=0,late=0,offDays=0;
+    var totalWorkedMins=0,shortMins=0,shortDays=0,otMins=0;
+    var weeklyOffWorkedMins=0,weeklyOffWorked=0;
+
     for(var i=1;i<=upto;i++){
       const ds=year+'-'+pad(month+1)+'-'+pad(i);
-      // Skip days before joining date
       if(joiningDate&&ds<joiningDate) continue;
       const dow=new Date(year,month,i).getDay();
       const mark=marks[ds]||(marks[ds+'_'+sid]);
       const rec=recs[sid+'_'+ds];
-      // Check if this is weekly off day
+      // Weekly off
       if(cfg.weeklyOff>=0&&dow==cfg.weeklyOff){
         offDays++;
         if(rec&&rec.inTime){
           weeklyOffWorked++;
-          // Add worked mins for this weekly off day
-          if(rec.workedMins) weeklyOffMins+=rec.workedMins;
-          else if(rec.outTime){const[oh,om]=parseTime12(rec.outTime);const[ih,im]=parseTime12(rec.inTime);weeklyOffMins+=Math.max(0,(oh*60+om)-(ih*60+im));}
-          else weeklyOffMins+=standardMins; // no out time — assume full shift
+          var wMins=rec.workedMins||0;
+          if(!wMins&&rec.outTime){var[wo,wom]=parseTime12(rec.outTime);var[wi,wim]=parseTime12(rec.inTime);wMins=Math.max(0,(wo*60+wom)-(wi*60+wim));}
+          weeklyOffWorkedMins+=wMins;
         }
         continue;
       }
       if(mark&&(mark.type==='holiday'||mark.type==='leave')){offDays++;continue;}
       workDays++;
-      if(rec&&rec.inTime){present++;if(rec.late)late++;
-        if(rec.outTime){const[oh,om]=parseTime12(rec.outTime);const diff=(oh*60+om)-(endH*60+endM);if(diff>0)otMins+=diff;}
-      }else absent++;
+      if(rec&&rec.inTime){
+        var dayMins=rec.workedMins||0;
+        // Calculate from sessions or flat record
+        if(!dayMins){
+          if(rec.sessions&&rec.sessions.length){
+            dayMins=rec.sessions.reduce(function(s,ss){return s+(ss.workedMins||0);},0);
+          } else if(rec.outTime){
+            var[oh,om]=parseTime12(rec.outTime);var[ih,im]=parseTime12(rec.inTime);
+            dayMins=Math.max(0,(oh*60+om)-(ih*60+im));
+          }
+        }
+        if(dayMins<minMins){
+          // Worked less than minimum — count as absent
+          absent++;
+        } else {
+          present++;
+          if(rec.late) late++;
+          totalWorkedMins+=dayMins;
+          // Short hours check
+          if(dayMins<stdMins){
+            shortDays++;
+            shortMins+=(stdMins-dayMins);
+          }
+          // OT = worked beyond standard hours
+          if(dayMins>stdMins) otMins+=(dayMins-stdMins);
+        }
+      } else {
+        absent++;
+      }
     }
+
+    // ── Payroll calculations ──
     const perDay=Math.round(cfg.base/30);
-    // Prorate base salary if joining mid-month in the selected month
+    const perMin=cfg.base/30/stdMins; // per minute rate
+
+    // Base pay — earned hours based
     var eligibleDays=upto;
     if(joiningDate&&joiningDate.startsWith(prefix)){
       var joinDay=parseInt(joiningDate.split('-')[2])||1;
       eligibleDays=upto-joinDay+1;
     }
-    var basePay=(eligibleDays<upto)?perDay*eligibleDays:cfg.base;
-    // Prorate weekly off bonus based on actual hours worked vs standard shift
-    const weeklyOffBonus=standardMins>0?Math.round((weeklyOffMins/standardMins)*perDay*weeklyOffWorked):0;
-    const absentD=Math.round(absent*perDay);
+    // Gross earned = present days at full rate minus proportional short deduction
+    var earnedMins=totalWorkedMins;
+    var maxEarnedMins=present*stdMins; // what they could have earned
+    // basePay = (earned mins / std mins per day) * perDay
+    var basePay=Math.round((earnedMins/stdMins)*perDay);
+    // Cap at eligible days worth
+    var maxPay=eligibleDays<upto?perDay*eligibleDays:cfg.base;
+    basePay=Math.min(basePay,maxPay);
+
+    // Short hours deduction (already baked into basePay via earnedMins, but show separately)
+    var shortDed=Math.round(shortMins*perMin);
+
+    // Absent deduction
+    var absentD=Math.round(absent*perDay);
+
+    // OT pay
+    var otPay=Math.round((otMins/60)*otRatePerHour);
+    var otH=Math.floor(otMins/60),otM2=otMins%60;
+
+    // Weekly off bonus
+    var weeklyOffBonus=stdMins>0?Math.round((weeklyOffWorkedMins/stdMins)*perDay*weeklyOffWorked):0;
+
+    // Late deduction
     var lateD=0;
-    if(cfg.lateRule==='fixed')lateD=late*(cfg.lateAmount||0);
-    else if(cfg.lateRule==='halfday')lateD=Math.floor(late/(cfg.lateHalfAfter||3))*Math.round(perDay/2);
-    const otH=Math.floor(otMins/60),otM=otMins%60;
-    const otPay=Math.round((otMins/60)*(cfg.otRate||0));
+    if(cfg.lateRule==='fixed') lateD=late*(cfg.lateAmount||0);
+    else if(cfg.lateRule==='halfday') lateD=Math.floor(late/(cfg.lateHalfAfter||3))*Math.round(perDay/2);
+
     const incentive=parseInt(v('pay-incentive-inp'))||0;
 
     // ── Advance Ledger — single source of truth is advLedger balance ──
@@ -1444,30 +1512,50 @@ window.renderPayroll=async function(){
 
     const R=function(id,val){const el=document.getElementById(id);if(el)el.textContent=val;};
     R('pay-net-amount','₹'+net.toLocaleString('en-IN'));R('pb-net','₹'+net.toLocaleString('en-IN'));
-    R('pb-base','₹'+basePay.toLocaleString('en-IN'));
+
+    // Base salary label — show hours earned
     var pbBaseLbl=document.getElementById('pb-base-lbl');
     if(pbBaseLbl){
-      if(eligibleDays<upto) pbBaseLbl.textContent='Base Salary ('+eligibleDays+' days × ₹'+perDay+')';
-      else pbBaseLbl.textContent='Base Salary';
+      var earnedH=Math.floor(earnedMins/60),earnedM2=earnedMins%60;
+      pbBaseLbl.textContent='Base Salary ('+earnedH+'h '+earnedM2+'m earned)';
     }
-    R('pb-ot','+₹'+otPay.toLocaleString('en-IN'));R('pb-ot-lbl','Overtime ('+otH+'h '+otM+'m)');
+    R('pb-base','₹'+basePay.toLocaleString('en-IN'));
+
+    // Short hours row
+    var shortRow=document.getElementById('pb-short-row');
+    if(shortRow){
+      if(shortDays>0){
+        shortRow.style.display='flex';
+        var shH=Math.floor(shortMins/60),shM=shortMins%60;
+        R('pb-short-lbl','Short Hours ('+shortDays+' day'+(shortDays>1?'s':'')+' · '+shH+'h '+shM+'m short)');
+        R('pb-short','−₹'+shortDed.toLocaleString('en-IN'));
+      } else shortRow.style.display='none';
+    }
+
+    R('pb-ot','+₹'+otPay.toLocaleString('en-IN'));
+    R('pb-ot-lbl','Overtime ('+otH+'h '+otM2+'m × ₹'+otRatePerHour+'/hr)');
     R('pb-incentive','+₹'+incentive.toLocaleString('en-IN'));
-    var woffHrs=Math.floor(weeklyOffMins/60),woffMin=weeklyOffMins%60;
+
+    var woffHrs=Math.floor(weeklyOffWorkedMins/60),woffMin=weeklyOffWorkedMins%60;
     R('pb-woff-bonus','+₹'+weeklyOffBonus.toLocaleString('en-IN'));
-    R('pb-woff-lbl','Weekly Off Worked ('+woffHrs+'h '+woffMin+'m × ₹'+perDay+'/day prorated)');
+    R('pb-woff-lbl','Weekly Off Worked ('+woffHrs+'h '+woffMin+'m prorated)');
     var woffRow=document.getElementById('pb-woff-row');
     if(woffRow)woffRow.style.display=weeklyOffWorked>0?'flex':'none';
+
     R('pb-absent-lbl','Absent ('+absent+' × ₹'+perDay+')');R('pb-absent','−₹'+absentD.toLocaleString('en-IN'));
     R('pb-late-lbl','Late ('+late+(cfg.lateRule==='fixed'?' × ₹'+cfg.lateAmount:'')+')');R('pb-late','−₹'+lateD.toLocaleString('en-IN'));
     R('pb-advance','−₹'+advActual.toLocaleString('en-IN'));
     if(advCarryFwd>0) R('pb-adv-carry','⚠️ ₹'+advCarryFwd.toLocaleString('en-IN')+' carries forward');
     else R('pb-adv-carry','✓ Advance fully cleared');
+
     document.getElementById('pay-att-stats').innerHTML=
       '<div class="stat-box"><div class="stat-num" style="color:var(--green)">'+present+'</div><div class="stat-lbl">Present</div></div>'+
       '<div class="stat-box"><div class="stat-num" style="color:var(--red)">'+absent+'</div><div class="stat-lbl">Absent</div></div>'+
       '<div class="stat-box"><div class="stat-num" style="color:var(--accent)">'+late+'</div><div class="stat-lbl">Late</div></div>'+
+      '<div class="stat-box"><div class="stat-num" style="color:#a855f7">'+shortDays+'</div><div class="stat-lbl">Short Days</div></div>'+
       '<div class="stat-box"><div class="stat-num" style="color:var(--blue)">'+offDays+'</div><div class="stat-lbl">Paid Off</div></div>';
-    document.getElementById('pay-ot-detail').textContent=otMins>0?'OT: '+otH+'h '+otM+'m · ₹'+cfg.otRate+'/hr · ₹'+otPay:'No overtime';
+    var otRateDisp=otRatePerHour>0?'₹'+otRatePerHour+'/hr':'₹0/hr (track only)';
+    document.getElementById('pay-ot-detail').textContent=otMins>0?'OT: '+otH+'h '+otM2+'m · '+otRateDisp+' · ₹'+otPay:'No overtime · Std: '+stdHours+'h/day';
     // Store computed values for markAsPaid
     out.dataset.advActual=advActual;
     out.dataset.advCarryFwd=advCarryFwd;
@@ -1749,15 +1837,47 @@ window.openSalarySettings=async function(staffId){
   const cfg=await getSalaryCfg(staffId);
   setLoading(false);
   document.getElementById('ss-base').value=cfg.base||0;
-  document.getElementById('ss-weeklyoff').value=cfg.weeklyOff||0;
-  document.getElementById('ss-otrate').value=cfg.otRate||0;
+  document.getElementById('ss-weeklyoff').value=cfg.weeklyOff!=null?cfg.weeklyOff:-1;
   document.getElementById('ss-start').value=cfg.startTime||'10:00';
   document.getElementById('ss-end').value=cfg.endTime||'21:00';
+  // Standard hours — auto calculate from shift if not set
+  var autoH=calcAutoStdHours(cfg.startTime||'10:00',cfg.endTime||'21:00');
+  document.getElementById('ss-stdhours').value=cfg.standardHours||autoH;
+  document.getElementById('ss-minhours').value=cfg.minHours||1;
+  document.getElementById('ss-otratemode').value=cfg.otRateMode||'none';
+  document.getElementById('ss-otrate').value=cfg.otRate||0;
+  toggleLateRule();
+  toggleOTRateMode();
   document.getElementById('ss-laterule').value=cfg.lateRule||'fixed';
   document.getElementById('ss-lateamt').value=cfg.lateAmount||50;
   document.getElementById('ss-lateafter').value=cfg.lateHalfAfter||3;
   toggleLateRule();
   openSheet('sheet-salary');
+};
+function calcAutoStdHours(startTime,endTime){
+  var s=startTime.split(':').map(Number),e=endTime.split(':').map(Number);
+  var mins=(e[0]*60+e[1])-(s[0]*60+s[1]);
+  return Math.round(mins/60*2)/2; // round to nearest 0.5
+}
+window.updateAutoStdHours=function(){
+  var start=v('ss-start'),end=v('ss-end');
+  if(!start||!end)return;
+  var auto=calcAutoStdHours(start,end);
+  document.getElementById('ss-stdhours').value=auto;
+  toggleOTRateMode();
+};
+window.toggleOTRateMode=function(){
+  var mode=v('ss-otratemode');
+  var wrap=document.getElementById('ss-otrate-wrap');
+  var autoDisp=document.getElementById('ss-otrate-auto-display');
+  if(mode==='manual'){wrap.style.display='block';autoDisp.style.display='none';}
+  else if(mode==='auto'){
+    wrap.style.display='none';autoDisp.style.display='block';
+    var base=parseInt(v('ss-base'))||0;
+    var stdH=parseFloat(v('ss-stdhours'))||calcAutoStdHours(v('ss-start')||'10:00',v('ss-end')||'21:00');
+    var autoRate=stdH>0?Math.round(base/30/stdH):0;
+    document.getElementById('ss-otrate-auto-val').textContent='₹'+autoRate+'/hr';
+  } else {wrap.style.display='none';autoDisp.style.display='none';}
 };
 window.toggleLateRule=function(){
   const val=v('ss-laterule');
@@ -1766,11 +1886,28 @@ window.toggleLateRule=function(){
 };
 window.saveSalarySettings=async function(){
   if(!editingSalaryStaffId)return;
-  const cfg={base:parseInt(v('ss-base'))||0,weeklyOff:parseInt(v('ss-weeklyoff')),startTime:v('ss-start'),endTime:v('ss-end'),otRate:parseInt(v('ss-otrate'))||0,lateRule:v('ss-laterule'),lateAmount:parseInt(v('ss-lateamt'))||0,lateHalfAfter:parseInt(v('ss-lateafter'))||3};
+  var startT=v('ss-start')||'10:00',endT=v('ss-end')||'21:00';
+  var autoH=calcAutoStdHours(startT,endT);
+  var stdH=parseFloat(v('ss-stdhours'))||autoH;
+  var otRateMode=v('ss-otratemode')||'none';
+  var base=parseInt(v('ss-base'))||0;
+  var otRate=otRateMode==='auto'?Math.round(base/30/stdH):otRateMode==='manual'?parseInt(v('ss-otrate'))||0:0;
+  const cfg={
+    base:base,
+    weeklyOff:parseInt(v('ss-weeklyoff')),
+    startTime:startT,endTime:endT,
+    standardHours:stdH,
+    minHours:parseFloat(v('ss-minhours'))||1,
+    otRateMode:otRateMode,
+    otRate:otRate,
+    lateRule:v('ss-laterule'),
+    lateAmount:parseInt(v('ss-lateamt'))||0,
+    lateHalfAfter:parseInt(v('ss-lateafter'))||3
+  };
   try{
     await fbSet(p.salary(editingSalaryStaffId),cfg);
     ls.set('ap_salary_'+editingSalaryStaffId,cfg);
-    clearSalaryCache(editingSalaryStaffId); // clear in-memory cache
+    clearSalaryCache(editingSalaryStaffId);
     const s=staffArr.find(x=>x.id===editingSalaryStaffId);
     if(s){s._startTime=cfg.startTime;ls.set('ap_staff_cache',staffArr);}
     closeSheet('sheet-salary');
@@ -2314,6 +2451,7 @@ td.g{color:#22c55e;}td.re{color:#ef4444;}
 <tr><td>${g('pb-ot-lbl')}</td><td class="r g">${g('pb-ot')}</td></tr>
 <tr><td>Sales Incentive</td><td class="r g">${g('pb-incentive')}</td></tr>
 ${document.getElementById('pb-woff-row')?.style.display!=='none'?'<tr><td>'+g('pb-woff-lbl')+'</td><td class="r g">'+g('pb-woff-bonus')+'</td></tr>':''}
+${document.getElementById('pb-short-row')?.style.display!=='none'?'<tr><td>'+g('pb-short-lbl')+'</td><td class="r re">'+g('pb-short')+'</td></tr>':''}
 <tr><td>${g('pb-absent-lbl')}</td><td class="r re">${g('pb-absent')}</td></tr>
 <tr><td>${g('pb-late-lbl')}</td><td class="r re">${g('pb-late')}</td></tr>
 <tr><td>Advance Recovered</td><td class="r re">${g('pb-advance')}</td></tr></table>
@@ -2345,48 +2483,65 @@ document.querySelectorAll('.sheet-overlay').forEach(el=>{
 // ─────────────────────────────────────────────
 //  CALENDAR / STATS HELPERS
 // ─────────────────────────────────────────────
-function drawCal(cid,year,month,sid,recs,marks,weeklyOff){
+function drawCal(cid,year,month,sid,recs,marks,weeklyOff,stdHours,minHours){
   const c=document.getElementById(cid);
-  let html=['Su','Mo','Tu','We','Th','Fr','Sa'].map(h=>`<div class="cal-head">${h}</div>`).join('');
+  let html=['Su','Mo','Tu','We','Th','Fr','Sa'].map(h=>'<div class="cal-head">'+h+'</div>').join('');
   const first=new Date(year,month,1).getDay();
-  for(let i=0;i<first;i++)html+=`<div></div>`;
+  for(let i=0;i<first;i++)html+='<div></div>';
   const dim=new Date(year,month+1,0).getDate(),today=todayStr();
+  var stdMinsC=stdHours?Math.round(stdHours*60):0;
+  var minMinsC=minHours?Math.round(minHours*60):60;
   for(let d=1;d<=dim;d++){
-    const ds=`${year}-${pad(month+1)}-${pad(d)}`;
+    const ds=year+'-'+pad(month+1)+'-'+pad(d);
     const dow=new Date(year,month,d).getDay();
     const isWeeklyOff=weeklyOff>=0&&dow===weeklyOff;
     const mark=marks[ds]||(sid?marks[ds+'_'+sid]:null);
-    const rec=sid?recs[`${sid}_${ds}`]:Object.values(recs).find(r=>r.date===ds);
-    let cls='cal-day';
+    const rec=sid?recs[sid+'_'+ds]:Object.values(recs).find(function(r){return r.date===ds;});
+    var cls='cal-day';
     if(ds===today)cls+=' today';
-    if(mark?.type==='holiday')cls+=' holiday';
-    else if(mark?.type==='leave')cls+=mark.leaveType==='half'?' halfday':' leave';
-    else if(rec?.inTime){cls+=' present';if(rec.late)cls+=' late';}
+    if(mark&&mark.type==='holiday')cls+=' holiday';
+    else if(mark&&mark.type==='leave')cls+=mark.leaveType==='half'?' halfday':' leave';
+    else if(rec&&rec.inTime){
+      var dayM=rec.workedMins||0;
+      if(!dayM&&rec.sessions&&rec.sessions.length)dayM=rec.sessions.reduce(function(s,ss){return s+(ss.workedMins||0);},0);
+      cls+=' present';
+      if(rec.late)cls+=' late';
+      if(stdMinsC>0&&dayM>0&&dayM<minMinsC)cls+=' short-absent'; // worked but below min
+      else if(stdMinsC>0&&dayM>0&&dayM<stdMinsC)cls+=' short-hours'; // present but short
+    }
     else if(isWeeklyOff)cls+=' weekly-off';
     else if(ds<today)cls+=' absent';
-    html+=`<div class="${cls}"${isWeeklyOff&&!rec?' title="Weekly Off"':''}>${d}</div>`;
+    html+='<div class="'+cls+'"'+(isWeeklyOff&&!rec?' title="Weekly Off"':'')+'>'+d+'</div>';
   }
   c.innerHTML=html;
 }
-function drawStats(cid,sid,year,month,recs,marks,weeklyOff){
+function drawStats(cid,sid,year,month,recs,marks,weeklyOff,stdHours,minHours){
   weeklyOff=weeklyOff>=0?weeklyOff:-1;
+  var stdMinsS=stdHours?Math.round(stdHours*60):0;
+  var minMinsS=minHours?Math.round(minHours*60):60;
   const dim=new Date(year,month+1,0).getDate(),now=new Date();
   const upto=(year===now.getFullYear()&&month===now.getMonth())?now.getDate():dim;
-  let present=0,late=0,absent=0,off=0;
-  for(let i=1;i<=upto;i++){
-    const ds=`${year}-${pad(month+1)}-${pad(i)}`;
+  var present=0,late=0,absent=0,off=0,shortDaysS=0;
+  for(var i=1;i<=upto;i++){
+    const ds=year+'-'+pad(month+1)+'-'+pad(i);
     const dow=new Date(year,month,i).getDay();
     const mark=marks[ds]||(sid?marks[ds+'_'+sid]:null);
     if(mark){off++;continue;}
     if(weeklyOff>=0&&dow===weeklyOff){off++;continue;}
-    const rec=recs[`${sid}_${ds}`];
-    if(rec?.inTime){present++;if(rec.late)late++;}else absent++;
+    const rec=recs[sid+'_'+ds];
+    if(rec&&rec.inTime){
+      var dayM=rec.workedMins||0;
+      if(!dayM&&rec.sessions&&rec.sessions.length)dayM=rec.sessions.reduce(function(s,ss){return s+(ss.workedMins||0);},0);
+      if(stdMinsS>0&&dayM<minMinsS){absent++;}
+      else{present++;if(rec.late)late++;if(stdMinsS>0&&dayM>0&&dayM<stdMinsS)shortDaysS++;}
+    } else absent++;
   }
-  document.getElementById(cid).innerHTML=`
-    <div class="stat-box"><div class="stat-num" style="color:var(--green)">${present}</div><div class="stat-lbl">Present</div></div>
-    <div class="stat-box"><div class="stat-num" style="color:var(--red)">${absent}</div><div class="stat-lbl">Absent</div></div>
-    <div class="stat-box"><div class="stat-num" style="color:var(--accent)">${late}</div><div class="stat-lbl">Late</div></div>
-    <div class="stat-box"><div class="stat-num" style="color:var(--blue)">${off}</div><div class="stat-lbl">Off Days</div></div>`;
+  document.getElementById(cid).innerHTML=
+    '<div class="stat-box"><div class="stat-num" style="color:var(--green)">'+present+'</div><div class="stat-lbl">Present</div></div>'+
+    '<div class="stat-box"><div class="stat-num" style="color:var(--red)">'+absent+'</div><div class="stat-lbl">Absent</div></div>'+
+    '<div class="stat-box"><div class="stat-num" style="color:var(--accent)">'+late+'</div><div class="stat-lbl">Late</div></div>'+
+    (shortDaysS>0?'<div class="stat-box"><div class="stat-num" style="color:#a855f7">'+shortDaysS+'</div><div class="stat-lbl">Short Days</div></div>':'')+
+    '<div class="stat-box"><div class="stat-num" style="color:var(--blue)">'+off+'</div><div class="stat-lbl">Off Days</div></div>';
 }
 
 // ─────────────────────────────────────────────
@@ -2683,6 +2838,7 @@ textarea.form-input{resize:none;}
 .cal-day.leave{background:rgba(245,166,35,.15);color:var(--accent);}
 .cal-day.halfday{background:rgba(139,92,246,.15);color:var(--purple);}
 .cal-day.late::after{content:'';position:absolute;top:2px;right:2px;width:4px;height:4px;border-radius:50%;background:var(--accent);}
+.cal-day.short-hours::before{content:'';position:absolute;top:2px;left:2px;width:4px;height:4px;border-radius:50%;background:#a855f7;}
 .cal-day.today{border:1.5px solid var(--accent);}
 .month-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
 .month-nav button{background:var(--s2);border:1px solid var(--border);color:var(--text);border-radius:8px;width:32px;height:32px;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
@@ -2766,7 +2922,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.15.8</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.16.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3038,7 +3194,7 @@ textarea.form-input{resize:none;}
           <span class="chip chip-green">Present</span><span class="chip chip-red">Absent</span>
           <span class="chip chip-blue">Holiday</span><span class="chip chip-yellow">Leave</span><span class="chip chip-purple">Half Day</span>
         </div>
-        <p style="font-size:11px;color:var(--muted);margin-top:8px;">Orange dot on day = late arrival</p>
+        <p style="font-size:11px;color:var(--muted);margin-top:8px;">🟠 Orange dot (right) = late arrival &nbsp;·&nbsp; 🟣 Purple dot (left) = worked less than standard hours</p>
       </div>
       <div class="card"><div class="card-title">Log</div>
         <div class="scroll-list" id="report-log"></div>
@@ -3079,6 +3235,7 @@ textarea.form-input{resize:none;}
           <div class="pay-row"><span class="pay-row-lbl">Sales Incentive</span><span class="pay-row-val" style="color:var(--green);" id="pb-incentive">+₹0</span></div>
           <div class="pay-row" id="pb-woff-row" style="display:none;"><span class="pay-row-lbl" id="pb-woff-lbl">Weekly Off Worked</span><span class="pay-row-val" style="color:var(--green);" id="pb-woff-bonus">+₹0</span></div>
           <div class="pay-section">Deductions</div>
+          <div class="pay-row" id="pb-short-row" style="display:none;"><span class="pay-row-lbl" id="pb-short-lbl">Short Hours</span><span class="pay-row-val" style="color:#a855f7;" id="pb-short">−₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl" id="pb-absent-lbl">Absent (0 days)</span><span class="pay-row-val" style="color:var(--red);" id="pb-absent">−₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl" id="pb-late-lbl">Late (0 days)</span><span class="pay-row-val" style="color:var(--red);" id="pb-late">−₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl">Advance Recovered</span><span class="pay-row-val" style="color:var(--red);" id="pb-advance">−₹0</span></div>
@@ -3482,12 +3639,23 @@ textarea.form-input{resize:none;}
           <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
           <option value="6">Saturday</option>
         </select></div>
-      <div class="form-group"><label class="form-label">OT Rate (₹/hr)</label><input type="number" class="form-input" id="ss-otrate" min="0"></div>
+      <div class="form-group"><label class="form-label">Shift Start</label><input type="time" class="form-input" id="ss-start" onchange="updateAutoStdHours()"></div>
     </div>
     <div class="two-col">
-      <div class="form-group"><label class="form-label">Shift Start</label><input type="time" class="form-input" id="ss-start"></div>
-      <div class="form-group"><label class="form-label">Shift End</label><input type="time" class="form-input" id="ss-end"></div>
+      <div class="form-group"><label class="form-label">Shift End</label><input type="time" class="form-input" id="ss-end" onchange="updateAutoStdHours()"></div>
+      <div class="form-group"><label class="form-label">Standard Hours/Day</label><input type="number" class="form-input" id="ss-stdhours" min="1" max="24" step="0.5" placeholder="Auto from shift"></div>
     </div>
+    <div class="form-group"><label class="form-label" style="display:flex;justify-content:space-between;">Min Hours to count as Present <span id="ss-minhours-hint" style="color:var(--muted);font-weight:400;">less = absent</span></label><input type="number" class="form-input" id="ss-minhours" min="0.5" max="12" step="0.5" placeholder="1"></div>
+    <div class="form-group"><label class="form-label">OT Rate</label>
+      <select class="form-input form-select" id="ss-otratemode" onchange="toggleOTRateMode()">
+        <option value="none">No OT Pay (track only)</option>
+        <option value="auto">Auto (Salary ÷ 30 ÷ Std Hours)</option>
+        <option value="manual">Manual — enter amount</option>
+      </select></div>
+    <div id="ss-otrate-wrap" style="display:none;">
+      <div class="form-group" style="margin-bottom:4px;"><label class="form-label">OT Rate (₹/hr)</label><input type="number" class="form-input" id="ss-otrate" min="0"></div>
+    </div>
+    <div id="ss-otrate-auto-display" style="display:none;font-size:12px;color:var(--muted);margin-bottom:14px;padding:8px 12px;background:var(--card2);border-radius:8px;">Auto OT rate: <strong id="ss-otrate-auto-val" style="color:var(--text);">—</strong></div>
     <div class="form-group"><label class="form-label">Late Deduction Rule</label>
       <select class="form-input form-select" id="ss-laterule" onchange="toggleLateRule()">
         <option value="fixed">Fixed amount per late day</option>
@@ -3571,7 +3739,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.15.8</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.16.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3579,10 +3747,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.15.8 -->
+    <!-- v1.16.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.15.8</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.16.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
