@@ -1427,7 +1427,7 @@ window.renderPayroll=async function(){
 
     var workDays=0,present=0,absent=0,late=0,offDays=0;
     var totalWorkedMins=0,shortMins=0,shortDays=0,otMins=0;
-    var weeklyOffWorkedMins=0,weeklyOffWorked=0,weeklyOffPaidDays=0;
+    var weeklyOffWorkedMins=0,weeklyOffWorked=0,weeklyOffPaidDays=0,paidLeaveDays=0;
 
     for(var i=1;i<=upto;i++){
       const ds=year+'-'+pad(month+1)+'-'+pad(i);
@@ -1447,7 +1447,15 @@ window.renderPayroll=async function(){
         }
         continue;
       }
-      if(mark&&(mark.type==='holiday'||mark.type==='leave')){offDays++;continue;}
+      if(mark&&(mark.type==='holiday'||mark.type==='leave')){
+        offDays++;
+        // Paid leave — credit standard hours
+        if(mark.type==='leave'&&mark.paidLeave){
+          totalWorkedMins+=stdMins;
+          paidLeaveDays++;
+        }
+        continue;
+      }
       workDays++;
       if(rec&&rec.inTime){
         var dayMins=rec.workedMins||0;
@@ -1609,7 +1617,15 @@ window.renderPayroll=async function(){
     var pbAbsentEl=document.getElementById('pb-absent');
     if(pbAbsentEl)pbAbsentEl.style.color='var(--muted)';
 
-    R('pb-late-lbl','Late ('+late+(cfg.lateRule==='fixed'?' × ₹'+cfg.lateAmount:'')+')');R('pb-late','−₹'+lateD.toLocaleString('en-IN'));
+    // Paid Leave display
+    var plRow=document.getElementById('pb-paidleave-row');
+    if(plRow){
+      if(paidLeaveDays>0){
+        plRow.style.display='flex';
+        R('pb-paidleave-lbl','Paid Leave ('+paidLeaveDays+' day'+(paidLeaveDays>1?'s':'')+' × ₹'+perDay+')');
+        R('pb-paidleave','+₹'+(paidLeaveDays*perDay).toLocaleString('en-IN'));
+      } else plRow.style.display='none';
+    }
     R('pb-advance','−₹'+advActual.toLocaleString('en-IN'));
     if(advCarryFwd>0) R('pb-adv-carry','⚠️ ₹'+advCarryFwd.toLocaleString('en-IN')+' carries forward');
     else R('pb-adv-carry','✓ Advance fully cleared');
@@ -2088,16 +2104,23 @@ window.changeOwnerPass=async function(){
   try{await fbSet(p.biz(),{ownerPass:np});ls.set('ap_biz_cache',biz);document.getElementById('set-owner-pass').value='';toast('✓ Password updated');}
   catch(e){toast('Error: '+e.message,true);}
 };
-window.toggleMarkStaff=function(){document.getElementById('mark-staff-grp').style.display=v('mark-type')==='leave'?'block':'none';};
+window.toggleMarkStaff=function(){
+  var isLeave=v('mark-type')==='leave';
+  document.getElementById('mark-staff-grp').style.display=isLeave?'block':'none';
+  document.getElementById('mark-paid-grp').style.display=isLeave?'block':'none';
+};
 window.markDay=async function(){
   const date=v('mark-date'),type=v('mark-type'),note=v('mark-note'),sid=v('mark-staff-sel');
   if(!date)return toast('Select date',true);
-  const data={type,note,date};if(type==='leave')data.staffId=sid;
+  const data={type,note,date};
+  if(type==='leave'){
+    data.staffId=sid;
+    data.paidLeave=v('mark-paid')==='paid';
+  }
   try{
     await fbSet(p.day(date,type==='leave'?sid:null),data);
-    // Clear marks cache so report reflects new mark immediately
     if(window._marksCache){var mp=date.slice(0,7);delete window._marksCache[mp];}
-    toast(`✓ ${date} marked`);document.getElementById('mark-note').value='';
+    toast('✓ '+date+' marked');document.getElementById('mark-note').value='';
   }
   catch(e){toast('Error: '+e.message,true);}
 };
@@ -2528,6 +2551,8 @@ window.printSalarySlip=function(){
     if(woffRowVis) html+='<tr><td>'+g('pb-woff-lbl')+'</td><td class="r g">'+g('pb-woff-bonus')+'</td></tr>';
     var woPayRowVis=document.getElementById('pb-wopay-row')&&document.getElementById('pb-wopay-row').style.display!=='none';
     if(woPayRowVis) html+='<tr><td>'+g('pb-wopay-lbl')+'</td><td class="r g">'+g('pb-wopay')+'</td></tr>';
+    var plRowVis=document.getElementById('pb-paidleave-row')&&document.getElementById('pb-paidleave-row').style.display!=='none';
+    if(plRowVis) html+='<tr><td>'+g('pb-paidleave-lbl')+'</td><td class="r g">'+g('pb-paidleave')+'</td></tr>';
     if(shortRowVis) html+='<tr><td>'+g('pb-short-lbl')+'</td><td class="r" style="color:#888;">'+g('pb-short')+'</td></tr>';
     html+='<tr><td>'+g('pb-absent-lbl')+'</td><td class="r" style="color:#888;">'+g('pb-absent')+'</td></tr>';
     html+='<tr><td>'+g('pb-late-lbl')+'</td><td class="r re">'+g('pb-late')+'</td></tr>';
@@ -3008,7 +3033,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.16.9</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.17.0</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3321,6 +3346,7 @@ textarea.form-input{resize:none;}
           <div class="pay-row"><span class="pay-row-lbl">Sales Incentive</span><span class="pay-row-val" style="color:var(--green);" id="pb-incentive">+₹0</span></div>
           <div class="pay-row" id="pb-woff-row" style="display:none;"><span class="pay-row-lbl" id="pb-woff-lbl">Weekly Off Worked</span><span class="pay-row-val" style="color:var(--green);" id="pb-woff-bonus">+₹0</span></div>
           <div class="pay-row" id="pb-wopay-row" style="display:none;"><span class="pay-row-lbl" id="pb-wopay-lbl">Weekly Off Pay</span><span class="pay-row-val" style="color:var(--green);" id="pb-wopay">+₹0</span></div>
+          <div class="pay-row" id="pb-paidleave-row" style="display:none;"><span class="pay-row-lbl" id="pb-paidleave-lbl">Paid Leave</span><span class="pay-row-val" style="color:var(--green);" id="pb-paidleave">+₹0</span></div>
           <div class="pay-section">Deductions</div>
           <div class="pay-row" id="pb-short-row" style="display:none;"><span class="pay-row-lbl" id="pb-short-lbl">Short Hours</span><span class="pay-row-val" style="color:#a855f7;" id="pb-short">−₹0</span></div>
           <div class="pay-row"><span class="pay-row-lbl" id="pb-absent-lbl">Absent (0 days)</span><span class="pay-row-val" style="color:var(--red);" id="pb-absent">−₹0</span></div>
@@ -3457,6 +3483,13 @@ textarea.form-input{resize:none;}
           </select>
         </div>
         <div class="form-group" id="mark-staff-grp" style="display:none;"><label class="form-label">Staff</label><select class="form-input form-select" id="mark-staff-sel"></select></div>
+        <div class="form-group" id="mark-paid-grp" style="display:none;">
+          <label class="form-label">Leave Type</label>
+          <select class="form-input form-select" id="mark-paid">
+            <option value="paid">✅ Paid Leave (standard hours credited)</option>
+            <option value="unpaid">❌ Unpaid Leave (no pay)</option>
+          </select>
+        </div>
         <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="mark-note" placeholder="e.g. Diwali, Sick leave"></div>
         <button class="btn btn-primary" onclick="markDay()">Mark Day</button>
       </div><!-- /card mark holiday -->
@@ -3837,7 +3870,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.16.9</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.17.0</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3845,10 +3878,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.16.9 -->
+    <!-- v1.17.0 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.16.9</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.17.0</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
