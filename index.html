@@ -1645,18 +1645,24 @@ window.renderPayroll=async function(){
     const payRec=await fbGet(p.payment(sid,mv)).catch(()=>null);
     const badge=document.getElementById('pay-status-badge');
     if(badge)badge.innerHTML=payRec?'<span class="status-approved">✓ Paid '+payRec.date+' via '+payRec.mode+'</span>':'<span class="status-pending">Unpaid</span>';
-    // If already paid — restore advance recovered amount from payment record
-    if(payRec&&payRec.advRecovered&&advInput){
-      advInput.value=payRec.advRecovered;
-      advInput.dataset.userEdited='1';
-      // Re-render net with correct advance
-      var savedAdv=payRec.advRecovered;
-      var savedNet=Math.max(0,netBeforeAdv-savedAdv);
-      R('pay-net-amount','₹'+savedNet.toLocaleString('en-IN'));
-      R('pb-net','₹'+savedNet.toLocaleString('en-IN'));
-      R('pb-advance','−₹'+savedAdv.toLocaleString('en-IN'));
-      var savedGross=netBeforeAdv;
-      R('pb-gross','₹'+savedGross.toLocaleString('en-IN'));
+    // If already paid — restore incentive and advance from payment record
+    if(payRec&&advInput){
+      // Restore incentive
+      if(payRec.incentive){
+        var incInp=document.getElementById('pay-incentive-inp');
+        if(incInp){incInp.value=payRec.incentive;}
+      }
+      // Restore advance recovered
+      if(payRec.advRecovered){
+        advInput.value=payRec.advRecovered;
+        advInput.dataset.userEdited='1';
+        var savedAdv=payRec.advRecovered;
+        var savedNet=Math.max(0,netBeforeAdv-savedAdv);
+        R('pay-net-amount','₹'+savedNet.toLocaleString('en-IN'));
+        R('pb-net','₹'+savedNet.toLocaleString('en-IN'));
+        R('pb-advance','−₹'+savedAdv.toLocaleString('en-IN'));
+        R('pb-gross','₹'+netBeforeAdv.toLocaleString('en-IN'));
+      }
     }
   }catch(e){toast('Payroll error: '+e.message,true);}
   setLoading(false);
@@ -1671,8 +1677,9 @@ window.markAsPaid=async function(){
   const advActual=parseInt(out.dataset.advActual)||0;
   const advCarryFwd=parseInt(out.dataset.advCarryFwd)||0;
   const totalOutstanding=parseInt(out.dataset.totalOutstanding)||0;
+  const incentiveSaved=parseInt(v('pay-incentive-inp'))||0;
   const staffName=staffArr.find(function(s){return s.id===sid;})&&staffArr.find(function(s){return s.id===sid;}).name;
-  const payRec={staffId:sid,staffName:staffName,month:mv,net,mode,note,advRecovered:advActual,advCarryFwd:advCarryFwd,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()};
+  const payRec={staffId:sid,staffName:staffName,month:mv,net,mode,note,advRecovered:advActual,advCarryFwd:advCarryFwd,incentive:incentiveSaved,date:new Date().toLocaleDateString('en-IN'),ts:Date.now()};
   setLoading(true,'Recording payment…');
   try{
     await fbSet(p.payment(sid,mv),payRec);
@@ -3046,7 +3053,7 @@ textarea.form-input{resize:none;}
     <div class="landing-logo">AP</div>
     <div style="font-family:var(--fh);font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Manage your staff<br><span style="background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">the smart way</span></div>
     <div style="color:var(--muted);font-size:14px;line-height:1.6;max-width:320px;margin:0 auto 14px;">Attendance, payroll, leaves & advances — all in one place. Built for small businesses.</div>
-    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.17.2</span>
+    <span style="display:inline-block;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;padding:5px 16px;letter-spacing:.5px;margin-bottom:20px;box-shadow:0 4px 14px rgba(245,166,35,.35);">v1.17.3</span>
   </div>
   <div class="feature-grid">
     <div class="feature-card"><div class="feature-icon">👁️</div><div class="feature-title">Selfie Proof</div><div class="feature-desc">Anti-proxy attendance with photo verification</div></div>
@@ -3883,7 +3890,7 @@ window.joinBusiness = async function(){
     <div class="card-sm" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div><div style="font-family:var(--fh);font-size:14px;font-weight:700;">AttendPro</div><div style="font-size:11px;color:var(--muted);margin-top:2px;">Staff Management Platform</div></div>
-        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.17.2</span>
+        <span style="font-size:11px;font-weight:700;color:var(--accent);background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.2);border-radius:20px;padding:3px 10px;">v1.17.3</span>
       </div>
     </div>
     <div class="card-sm" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
@@ -3891,10 +3898,10 @@ window.joinBusiness = async function(){
       <button class="btn btn-ghost btn-sm" onclick="toggleNotifications()" id="notif-toggle-btn">Enable</button>
     </div>
     <div style="font-family:var(--fh);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">📋 What's New</div>
-    <!-- v1.17.2 -->
+    <!-- v1.17.3 -->
     <div style="margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.17.2</span>
+        <span style="font-family:var(--fh);font-size:13px;font-weight:700;color:var(--accent);">v1.17.3</span>
         <span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:2px 7px;">CURRENT</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px;">
